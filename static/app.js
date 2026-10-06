@@ -1,0 +1,607 @@
+/* SusMob SPA – Kacheln, Chat (SSE), Standardwerte, Admin-Prompts */
+"use strict";
+
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const view = $("#view");
+
+const state = {
+  tiles: [],
+  tile: null,
+  convs: [],
+  conv: null,
+  std: [],
+  busy: false,
+  admin: { token: localStorage.getItem("susmob_admin") || "" },
+  adminTiles: [],
+  adminTile: null,
+  testCases: [],
+};
+
+let toastTimer = null;
+function toast(msg) {
+  let t = $(".toast");
+  if (t) t.remove();
+  t = document.createElement("div");
+  t.className = "toast";
+  t.textContent = msg;
+  document.body.appendChild(t);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.remove(), 3200);
+}
+
+async function api(path, opts = {}) {
+  const headers = opts.headers || {};
+  if (state.admin.token && path.startsWith("/api/admin")) headers["X-Admin-Token"] = state.admin.token;
+  const r = await fetch(path, { ...opts, headers });
+  if (!r.ok) {
+    let m = r.statusText;
+    try { m = (await r.json()).detail || m; } catch { /* ignore */ }
+    throw new Error(m);
+  }
+  return r.json();
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " kB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+
+/* ---------- Mini-Markdown (reicht für Bot-Antworten) ---------- */
+function inline(s) {
+  s = esc(s);
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return s;
+}
+function md(src) {
+  if (!src) return "";
+  const blocks = [];
+  src = src.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (m, _lang, code) => {
+    blocks.push(`<pre class="code"><code>${esc(code.replace(/\n$/, ""))}</code></pre>`);
+    return `\u0000B${blocks.length - 1}\u0000`;
+  });
+  const lines = src.split("\n");
+  let html = "", inUl = false, inOl = false, table = null;
+  const closeLists = () => { if (inUl) { html += "</ul>"; inUl = false; } if (inOl) { html += "</ol>"; inOl = false; } };
+  const closeTable = () => {
+    if (table) {
+      let h = "<table><tbody>";
+      if (table.head.length) h += "<tr>" + table.head.map(c => `<th>${c}</th>`).join("") + "</tr>";
+      h += table.rows.map(r => "<tr>" + r.map(c => `<td>${c}</td>`).join("") + "</tr>").join("");
+      html += h + "</tbody></table>";
+      table = null;
+    }
+  };
+  for (const raw of lines) {
+    const t = raw.trim().replace(/\u0000B(\d+)\u0000/g, (m, i) => blocks[+i]);
+    if (/^\|.*\|$/.test(t)) {
+      const cells = t.split("|").slice(1, -1).map(c => inline(c.trim()));
+      if (!table) table = { head: [], rows: [] };
+      if (cells.every(c => /^:?-{2,}:?$/.test(c))) continue;
+      if (!table.head.length) { table.head = cells; continue; }
+      table.rows.push(cells);
+      continue;
+    }
+    closeTable();
+    if (!t) { closeLists(); continue; }
+    let m;
+    if ((m = t.match(/^(#{1,4})\s+(.*)/))) { closeLists(); html += `<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`; continue; }
+    if (/^(-{3,}|\*{3,})$/.test(t)) { closeLists(); html += "<hr>"; continue; }
+    if ((m = t.match(/^[-*]\s+(.*)/))) {
+      if (inOl) { html += "</ol>"; inOl = false; }
+      if (!inUl) { html += "<ul>"; inUl = true; }
+      html += `<li>${inline(m[1])}</li>`; continue;
+    }
+    if ((m = t.match(/^\d+[.)]\s+(.*)/))) {
+      if (inUl) { html += "</ul>"; inUl = false; }
+      if (!inOl) { html += "<ol>"; inOl = true; }
+      html += `<li>${inline(m[1])}</li>`; continue;
+    }
+    closeLists();
+    html += `<p>${inline(t)}</p>`;
+  }
+  closeLists(); closeTable();
+  return html;
+}
+
+/* ---------- Router ---------- */
+window.addEventListener("hashchange", route);
+function navActive(id) {
+  $$(".topbar nav a").forEach(a => a.classList.toggle("active", a.dataset.nav === id));
+}
+function route() {
+  const h = location.hash || "#/";
+  let m;
+  if (h === "#/" || h === "#") return viewHome();
+  if ((m = h.match(/^#\/tile\/([\w-]+)/))) return viewTile(m[1]);
+  if (h === "#/admin") return viewAdmin();
+  viewHome();
+}
+
+/* ---------- Home ---------- */
+async function viewHome() {
+  navActive("home");
+  view.innerHTML = `<div class="homehead"><h1>Mobilität für deine Kommune</h1>
+    <p>Kachel wählen · Daten hochladen · mit dem Fach-Bot chatten · Ergebnis erhalten.</p></div>
+    <div class="tiles" id="tiles">Lädt …</div>`;
+  try {
+    state.tiles = await api("/api/tiles");
+  } catch (e) {
+    $("#tiles").innerHTML = `<p class="errbox">API nicht erreichbar: ${esc(e.message)}</p>`;
+    return;
+  }
+  $("#tiles").innerHTML = state.tiles.map(t => `
+    <a class="tile" href="#/tile/${t.id}">
+      <div class="emoji">${t.emoji}</div>
+      <h3>${esc(t.name)}</h3>
+      <p>${esc(t.short)}</p>
+      <span class="go">Starten →</span>
+    </a>`).join("");
+}
+
+/* ---------- Tile-Ansicht ---------- */
+async function viewTile(tid) {
+  navActive("home");
+  state.tile = null; state.conv = null;
+  view.innerHTML = `<div class="tilehead"><span style="color:var(--muted)">Lädt …</span></div>`;
+  let tile;
+  try { tile = (await api("/api/tiles")).find(t => t.id === tid); } catch (e) { return errView(e); }
+  if (!tile) return errView(new Error("Kachel nicht gefunden"));
+  state.tile = tile;
+  view.innerHTML = `
+    <div class="tilehead">
+      <a class="back" href="#/">← Kacheln</a>
+      <div class="tiletitle">
+        <span class="emoji">${tile.emoji}</span>
+        <div><h2>${esc(tile.name)}</h2><div class="sub">${esc(tile.short)}</div></div>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="stdToggle">⚙️ Standardwerte</button>
+        <button class="btn primary" id="newConv">+ Neue Unterhaltung</button>
+      </div>
+    </div>
+    <div id="stdPanel" class="stdpanel hidden"></div>
+    <div class="tilebody">
+      <aside class="convs">
+        <div class="convs-head">Unterhaltungen</div>
+        <div id="convList"></div>
+      </aside>
+      <section class="chat">
+        <div id="msgArea"></div>
+        <div class="filechips" id="fileChips"></div>
+        <div class="composer">
+          <label class="attach" title="Datei anhängen (txt, csv, xlsx, docx, pdf …)">📎
+            <input type="file" id="fileInput" multiple>
+          </label>
+          <textarea id="msgInput" rows="2" placeholder="Frage stellen, Daten beschreiben oder Datei anhängen …"></textarea>
+          <button class="btn primary" id="sendBtn">Senden</button>
+        </div>
+      </section>
+    </div>`;
+
+  await loadConvs(tid);
+  $("#stdToggle").onclick = () => toggleStd();
+  $("#newConv").onclick = async () => {
+    const r = await api("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tile_id: tid }) });
+    await loadConvs(tid);
+    openConv(r.id);
+  };
+  $("#sendBtn").onclick = sendMsg;
+  $("#msgInput").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+  });
+  $("#fileInput").addEventListener("change", onFiles);
+
+  if (state.convs.length) openConv(state.convs[0].id);
+  else renderEmptyChat();
+}
+
+function errView(e) {
+  view.innerHTML = `<div class="empty"><div class="big">😕</div><p>${esc(e.message)}</p></div>`;
+}
+
+async function loadConvs(tid) {
+  state.convs = await api("/api/conversations?tile_id=" + encodeURIComponent(tid));
+  const list = $("#convList");
+  if (!list) return;
+  list.innerHTML = state.convs.length
+    ? state.convs.map(c => `
+      <div class="convitem ${state.conv && state.conv.id === c.id ? "active" : ""}" data-cid="${c.id}">
+        <span class="t" title="${esc(c.title)}">${esc(c.title)}</span>
+        <span class="del" title="Löschen" data-del="${c.id}">✕</span>
+      </div>`).join("")
+    : `<div style="color:var(--muted);font-size:0.8rem;padding:0.4rem 0.5rem">Noch keine Unterhaltungen.</div>`;
+  $$(".convitem", list).forEach(el => {
+    el.onclick = () => openConv(el.dataset.cid);
+  });
+  $$(".convitem .del", list).forEach(el => {
+    el.onclick = async ev => {
+      ev.stopPropagation();
+      if (!confirm("Unterhaltung wirklich löschen?")) return;
+      await api("/api/conversations/" + el.dataset.del, { method: "DELETE" });
+      state.conv = null;
+      await loadConvs(state.tile.id);
+      renderEmptyChat();
+    };
+  });
+}
+
+function renderEmptyChat() {
+  const area = $("#msgArea");
+  const s = state.tile.suggestions || [];
+  area.innerHTML = `<div class="empty">
+    <div class="big">${state.tile.emoji}</div>
+    <p><strong>${esc(state.tile.name)}</strong> – Daten hochladen (📎) oder direkt loslegen.</p>
+    ${s.length ? `<div class="sugg">${s.map(x => `<button data-sugg="${esc(x)}">${esc(x.slice(0, 64))}${x.length > 64 ? "…" : ""}</button>`).join("")}</div>` : ""}
+  </div>`;
+  $$("#msgArea .sugg button").forEach(b => {
+    b.onclick = () => { $("#msgInput").value = b.dataset.sugg; $("#msgInput").focus(); };
+  });
+}
+
+async function openConv(cid) {
+  try { state.conv = await api("/api/conversations/" + cid); }
+  catch (e) { return toast("Fehler: " + e.message); }
+  $$("#convList .convitem").forEach(el => el.classList.toggle("active", el.dataset.cid === cid));
+  renderMessages();
+  renderFiles();
+}
+
+function renderMessages() {
+  const area = $("#msgArea");
+  const msgs = state.conv?.messages || [];
+  if (!msgs.length) { area.innerHTML = ""; return; }
+  area.innerHTML = msgs.map(m => m.role === "user"
+    ? `<div class="msg user">${esc(m.content)}</div>`
+    : `<div class="msg bot"><div class="who">🤖 ${esc(state.tile.name)}-Bot</div><div class="body">${md(m.content)}</div></div>`
+  ).join("");
+  area.scrollTop = area.scrollHeight;
+}
+
+function renderFiles() {
+  const box = $("#fileChips");
+  const files = state.conv?.files || [];
+  box.innerHTML = files.map(f => `
+    <span class="chip">📄 ${esc(f.filename)} <span style="color:var(--muted)">(${fmtBytes(f.size)})</span>
+      ${f.extracted_chars ? `<span class="ok" title="Inhalt extrahiert">✓</span>` : `<span title="Kein Text extrahierbar">·</span>`}
+      <span class="x" data-fid="${f.id}" title="Entfernen">✕</span>
+    </span>`).join("");
+  $$("#fileChips .x").forEach(x => {
+    x.onclick = async () => {
+      await api(`/api/conversations/${state.conv.id}/files/${x.dataset.fid}`, { method: "DELETE" });
+      state.conv.files = state.conv.files.filter(f => f.id !== x.dataset.fid);
+      renderFiles();
+    };
+  });
+}
+
+async function onFiles(e) {
+  const files = [...e.target.files];
+  e.target.value = "";
+  if (!state.conv) {
+    const r = await api("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tile_id: state.tile.id }) });
+    await loadConvs(state.tile.id);
+    await openConv(r.id);
+  }
+  for (const f of files) {
+    const fd = new FormData();
+    fd.append("file", f);
+    try {
+      const r = await fetch(`/api/conversations/${state.conv.id}/files`, { method: "POST", body: fd });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.detail || r.statusText); }
+    } catch (err) { toast("Upload fehlgeschlagen: " + err.message); continue; }
+  }
+  state.conv = await api("/api/conversations/" + state.conv.id);
+  renderFiles();
+}
+
+async function sendMsg() {
+  if (state.busy) return;
+  const input = $("#msgInput");
+  const text = input.value.trim();
+  if (!text) return;
+  if (!state.conv) {
+    const r = await api("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tile_id: state.tile.id }) });
+    await loadConvs(state.tile.id);
+    state.conv = await api("/api/conversations/" + r.id);
+  }
+  input.value = "";
+  const area = $("#msgArea");
+  const empty = $(".empty", area);
+  if (empty) empty.remove();
+  const userEl = document.createElement("div");
+  userEl.className = "msg user";
+  userEl.textContent = text;
+  area.appendChild(userEl);
+  const botEl = document.createElement("div");
+  botEl.className = "msg bot";
+  botEl.innerHTML = `<div class="who">🤖 ${esc(state.tile.name)}-Bot</div><div class="body"></div>`;
+  area.appendChild(botEl);
+  const bodyEl = $(".body", botEl);
+  let acc = "";
+  area.scrollTop = area.scrollHeight;
+  state.busy = true;
+  $("#sendBtn").disabled = true;
+  try {
+    const res = await fetch(`/api/conversations/${state.conv.id}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+    if (!res.ok) {
+      let m = res.statusText;
+      try { m = (await res.json()).detail || m; } catch { /* ignore */ }
+      throw new Error(m);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        let ev = "", data = "";
+        for (const line of chunk.split("\n")) {
+          if (line.startsWith("event: ")) ev = line.slice(7).trim();
+          else if (line.startsWith("data: ")) data = line.slice(6);
+        }
+        if (!data) continue;
+        let o; try { o = JSON.parse(data); } catch { continue; }
+        if (ev === "token") {
+          acc += o.t;
+          bodyEl.innerHTML = md(acc) + '<span class="cursor"></span>';
+          area.scrollTop = area.scrollHeight;
+        } else if (ev === "error") {
+          botEl.classList.add("err");
+          bodyEl.innerHTML = `<p class="errbox">⚠️ ${esc(o.error)}</p>`;
+        }
+      }
+    }
+    bodyEl.innerHTML = md(acc);
+  } catch (e) {
+    botEl.classList.add("err");
+    bodyEl.innerHTML = `<p class="errbox">⚠️ ${esc(e.message)}</p>`;
+  } finally {
+    state.busy = false;
+    $("#sendBtn").disabled = false;
+    area.scrollTop = area.scrollHeight;
+    // Konversation aktualisieren (Titel kann sich geändert haben)
+    const r = await api("/api/conversations/" + state.conv.id).catch(() => null);
+    if (r) state.conv = r;
+    loadConvs(state.tile.id);
+  }
+}
+
+/* ---------- Standardwerte ---------- */
+async function toggleStd() {
+  const panel = $("#stdPanel");
+  if (!panel.classList.contains("hidden")) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<h3>⚙️ Standardwerte für „${esc(state.tile.name)}"</h3>
+    <p class="hint">Diese Werte fließen in jeden Chat als „Konfiguration der Kommune" ein und haben Vorrang vor den Standardwerten im System-Prompt.</p>
+    <div class="stdgrid" id="stdGrid">Lädt …</div>
+    <div style="margin-top:1rem"><button class="btn primary" id="stdSave">Speichern</button></div>`;
+  state.std = await api("/api/tiles/" + state.tile.id + "/standardwerte");
+  $("#stdGrid").innerHTML = state.std.map(s => `
+    <label class="f"><span>${esc(s.label)}${s.unit ? ` <small style="color:var(--muted)">[${esc(s.unit)}]</small>` : ""}</span>
+      <input type="text" data-key="${esc(s.key)}" value="${esc(s.value)}" placeholder="${esc(s.default_value || "–")}">
+      <small>${esc(s.description)}</small>
+    </label>`).join("") || `<p class="hint">Keine Standardwerte hinterlegt.</p>`;
+  $("#stdSave").onclick = async () => {
+    const values = {};
+    $$("#stdGrid input").forEach(i => { values[i.dataset.key] = i.value.trim(); });
+    await api("/api/tiles/" + state.tile.id + "/standardwerte", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values }),
+    });
+    toast("Standardwerte gespeichert ✓");
+  };
+}
+
+/* ---------- Admin ---------- */
+async function viewAdmin() {
+  navActive("admin");
+  const status = await api("/api/admin/status");
+  if (status.protected && !state.admin.token) return adminLogin();
+  view.innerHTML = `<div class="adminhead">
+      <h1>⚙️ System-Prompts & Modelle</h1>
+      <p>Pro Kachel: Modell, Temperature, Fach-Prompt, Versionen und Testläufe mit Testdaten.</p>
+      <div class="actions">${status.protected ? `<button class="btn ghost" id="logout">Abmelden</button>` : `<span class="okbox" style="font-size:0.8rem">offen (kein ADMIN_PASSWORD)</span>`}</div>
+    </div>
+    <div class="adminbody">
+      <aside class="adminlist" id="adminList">Lädt …</aside>
+      <section class="adminmain" id="adminMain"></section>
+    </div>`;
+  if (status.protected) $("#logout").onclick = () => { localStorage.removeItem("susmob_admin"); state.admin.token = ""; adminLogin(); };
+  await loadAdminTiles();
+}
+
+function adminLogin() {
+  view.innerHTML = `<div class="loginbox card">
+    <h3 style="font-size:1.1rem;margin-bottom:0.8rem">🔐 Admin-Bereich</h3>
+    <label class="f"><span>Passwort</span><input type="password" id="admPw" placeholder="ADMIN_PASSWORD"></label>
+    <button class="btn primary" id="admGo" style="width:100%">Anmelden</button>
+    <p class="errbox" id="admErr" style="margin-top:0.6rem"></p>
+  </div>`;
+  const go = async () => {
+    try {
+      const r = await api("/api/admin/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: $("#admPw").value }) });
+      state.admin.token = r.token;
+      localStorage.setItem("susmob_admin", r.token);
+      viewAdmin();
+    } catch (e) { $("#admErr").textContent = e.message; }
+  };
+  $("#admGo").onclick = go;
+  $("#admPw").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+}
+
+async function loadAdminTiles() {
+  state.adminTiles = await api("/api/admin/tiles");
+  const list = $("#adminList");
+  list.innerHTML = state.adminTiles.map(t => `
+    <div class="item ${state.adminTile && state.adminTile.id === t.id ? "active" : ""}" data-tid="${t.id}">
+      <span>${t.emoji}</span><span>${esc(t.name)}</span>
+    </div>`).join("");
+  $$("#adminList .item").forEach(el => el.onclick = () => selectAdminTile(el.dataset.tid));
+  if (!state.adminTile || !state.adminTiles.find(t => t.id === state.adminTile.id)) {
+    state.adminTile = state.adminTiles[0] || null;
+  }
+  renderAdminMain();
+}
+
+async function selectAdminTile(tid) {
+  state.adminTile = state.adminTiles.find(t => t.id === tid) || null;
+  $$("#adminList .item").forEach(el => el.classList.toggle("active", el.dataset.tid === tid));
+  renderAdminMain();
+}
+
+async function renderAdminMain() {
+  const main = $("#adminMain");
+  const t = state.adminTile;
+  if (!t) { main.innerHTML = `<div class="card"><p class="hint">Keine Kachel vorhanden.</p></div>`; return; }
+  const models = await api("/api/models");
+  const versions = await api(`/api/admin/tiles/${t.id}/versions`);
+  state.testCases = await api(`/api/admin/tiles/${t.id}/test-cases`);
+  let tcActive = state.testCases[0] ? state.testCases[0].id : null;
+
+  main.innerHTML = `
+    <div class="card">
+      <h3>Modell & Parameter <span style="color:var(--muted);font-weight:400;font-size:0.8rem">${t.emoji} ${esc(t.name)}</span></h3>
+      <div class="row">
+        <label class="f"><span>Modell (OpenRouter)</span>
+          <select id="modelSel">
+            ${models.map(m => `<option value="${m}" ${m === t.model ? "selected" : ""}>${m}</option>`).join("")}
+            ${models.includes(t.model) ? "" : `<option value="${esc(t.model)}" selected>${esc(t.model)} (eigener)</option>`}
+          </select>
+        </label>
+        <label class="f" style="max-width:260px"><span>Temperature: <b id="tempVal">${t.temperature}</b></span>
+          <input type="range" id="tempRange" min="0" max="1" step="0.05" value="${t.temperature}">
+        </label>
+        <div style="align-self:flex-end"><button class="btn primary" id="saveMeta">💾 Speichern</button></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>System-Prompt <span style="color:var(--muted);font-weight:400;font-size:0.78rem">Fachlichkeit, Fallback-Werte, Ausgabestruktur</span></h3>
+      <textarea id="promptArea" class="mono" rows="16">${esc(t.system_prompt)}</textarea>
+      <div style="display:flex;gap:0.6rem;margin-top:0.7rem;align-items:center">
+        <button class="btn primary" id="savePrompt">💾 Prompt speichern</button>
+        <span class="hint" style="color:var(--muted);font-size:0.75rem">Letzte Änderung: ${esc(t.prompt_updated_at || "–")} · Speichern erzeugt eine Version</span>
+      </div>
+      <div class="versions">
+        <h4>Versionshistorie</h4>
+        <ul>${versions.map(v => `<li><span style="flex:1">v${v.id} · ${esc(v.created_at)} · ${v.chars} Zeichen · ${esc(v.model)}</span>
+          <button class="btn" data-vr="${v.id}">♻️ Wiederherstellen</button></li>`).join("") || `<li>Keine Versionen.</li>`}</ul>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Testlauf mit Testdaten</h3>
+      <div class="testgrid">
+        <div>
+          <label class="f"><span>Testfall</span>
+            <div class="testcase-list" id="tcList">
+              ${state.testCases.map(c => `<button class="tc ${c.id === tcActive ? "active" : ""}" data-tcid="${c.id}">${esc(c.name)}<span class="sub">${esc(c.message.slice(0, 80))}</span></button>`).join("") || `<span style="font-size:0.8rem;color:var(--muted)">Keine Testfälle.</span>`}
+            </div>
+          </label>
+          <div style="display:flex;gap:0.5rem">
+            <button class="btn" id="tcAdd">+ Testfall anlegen</button>
+            <button class="btn danger" id="tcDel">🗑 Löschen</button>
+          </div>
+        </div>
+        <div>
+          <label class="f"><span>Test-Nachricht</span><textarea id="testMsg" rows="4"></textarea></label>
+          <details style="margin-bottom:0.8rem"><summary style="cursor:pointer;color:var(--muted);font-size:0.85rem;margin-bottom:0.4rem">Dateikontext (simulierter Upload)</summary>
+            <textarea id="testFile" class="mono" rows="5" placeholder="z. B. CSV-Zeilen oder Textauszug"></textarea>
+          </details>
+          <button class="btn primary" id="runTest">▶ Testlauf starten</button>
+          <div class="result" id="testResult"></div>
+        </div>
+      </div>
+    </div>`;
+
+  const firstTc = state.testCases[0];
+  if (firstTc) {
+    $("#testMsg").value = firstTc.message;
+    $("#testFile").value = firstTc.file_content;
+  }
+  $$("#tcList .tc").forEach(b => {
+    b.onclick = () => {
+      const tc = state.testCases.find(c => c.id === +b.dataset.tcid);
+      if (!tc) return;
+      $("#testMsg").value = tc.message;
+      $("#testFile").value = tc.file_content;
+      $$("#tcList .tc").forEach(x => x.classList.toggle("active", x === b));
+    };
+  });
+
+  $("#tempRange").oninput = e => { $("#tempVal").textContent = e.target.value; };
+  $("#saveMeta").onclick = async () => {
+    await api("/api/admin/tiles/" + t.id, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: $("#modelSel").value, temperature: parseFloat($("#tempRange").value) }),
+    });
+    toast("Modell & Parameter gespeichert ✓");
+    await loadAdminTiles();
+  };
+  $("#savePrompt").onclick = async () => {
+    await api("/api/admin/tiles/" + t.id, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ system_prompt: $("#promptArea").value }),
+    });
+    toast("Prompt gespeichert ✓ (neue Version angelegt)");
+    await loadAdminTiles();
+  };
+  $$("#adminMain .versions [data-vr]").forEach(b => {
+    b.onclick = async () => {
+      if (!confirm("Diese Version als aktuelle übernehmen?")) return;
+      await api(`/api/admin/tiles/${t.id}/versions/${b.dataset.vr}/restore`, { method: "POST" });
+      toast("Version wiederhergestellt ✓");
+      await loadAdminTiles();
+    };
+  });
+  $("#tcAdd").onclick = async () => {
+    const name = prompt("Name des Testfalls:");
+    if (!name) return;
+    await api(`/api/admin/tiles/${t.id}/test-cases`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, message: $("#testMsg").value, file_content: $("#testFile").value }),
+    });
+    state.testCases = await api(`/api/admin/tiles/${t.id}/test-cases`);
+    renderAdminMain();
+  };
+  $("#tcDel").onclick = async () => {
+    const active = $("#tcList .tc.active");
+    if (!active) return toast("Kein Testfall ausgewählt");
+    if (!confirm("Testfall löschen?")) return;
+    await api(`/api/admin/tiles/${t.id}/test-cases/${active.dataset.tcid}`, { method: "DELETE" });
+    state.testCases = await api(`/api/admin/tiles/${t.id}/test-cases`);
+    renderAdminMain();
+  };
+  $("#runTest").onclick = async () => {
+    const btn = $("#runTest");
+    btn.disabled = true; btn.innerHTML = `<span class="spin">⏳</span> Läuft …`;
+    $("#testResult").innerHTML = "";
+    try {
+      const r = await api(`/api/admin/tiles/${t.id}/test`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: $("#testMsg").value, file_content: $("#testFile").value }),
+      });
+      $("#testResult").innerHTML = `<div class="meta">Modell: <b>${esc(r.model)}</b> · OK</div><pre>${esc(r.content)}</pre>`;
+    } catch (e) {
+      $("#testResult").innerHTML = `<div class="errbox">⚠️ ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = "▶ Testlauf starten";
+    }
+  };
+}
+
+/* ---------- Init ---------- */
+route();

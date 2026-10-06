@@ -3,34 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SusMob – Hello World</title>
-  <style>
-    * { margin: 0; box-sizing: border-box; }
-    body {
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-      background: radial-gradient(1200px 600px at 50% -10%, #1e293b, #0f172a);
-      color: #e2e8f0;
-    }
-    main { text-align: center; padding: 2rem; }
-    h1 { font-size: clamp(2.5rem, 8vw, 4.5rem); font-weight: 800; letter-spacing: -0.02em; }
-    h1 span { color: #38bdf8; }
-    p { margin-top: 0.75rem; color: #94a3b8; font-size: 1.05rem; }
-    code {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 6px;
-      padding: 0.15em 0.45em;
-      font-size: 0.9em;
-    }
-  </style>
+  <title>SusMob – Mobilitätsmanagement für Kommunen</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚌</text></svg>" />
 </head>
 <body>
-  <main>
-    <h1>Hello, <span>World</span> 👋</h1>
-    <p>SusMob ist online – <code>index.html</code> erfolgreich gepusht.</p>
-  </main>
+  <header class="topbar">
+    <a class="brand" href="#/">🚌 <strong>SusMob</strong><span class="tag">Kommunales Mobilitätsmanagement</span></a>
+    <nav>
+      <a href="#/" data-nav="home">Kacheln</a>
+      <a href="#/admin" data-nav="admin">Admin · Prompts</a>
+    </nav>
+  </header>
+  <main id="view" class="view"></main>
+  <footer class="foot">SusMob · Fach-Prompts zentral pflegbar · Modelle via OpenRouter</footer>
+  <script src="/static/app.js"></script>
 </body>
 </html>

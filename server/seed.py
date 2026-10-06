@@ -10,28 +10,59 @@ from __future__ import annotations
 
 from server import db
 
+# Tupel: (id, emoji, name, short, modell, temperature, sort, fallback_models, rechner)
+# Modellwahl nach Plan-Abschnitt 2.3/2.5: nur Modelle mit bestätigtem Endpunkt,
+# dazu eine Fallback-Kette (3 Modelle) gegen Ausfälle wie beim Qwen-Fund.
 TILES = [
     ("co2-bilanz", "🌍", "CO₂-Bilanz",
      "Emissionsbilanz des Verkehrs aus Fahr-, ÖPNV- und Fuhrparksdaten – mit Annahmen, Tabellen und Einsparpotenzialen.",
-     "nvidia/nemotron-3-ultra-550b-a55b:free", 0.2, 1),
+     "nvidia/nemotron-3-ultra-550b-a55b:free", 0.2, 1,
+     "nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free", "co2-bilanz"),
     ("beschlussvorlagen", "📄", "Beschlussvorlagen & Förderanträge",
      "Formgerechte Vorlagen für politische Gremien und passende Förderprogramme (Klimafonds/KIP, NAPE & Co.).",
-     "qwen/qwen3.8-27b:free", 0.2, 2),
+     "apodex/apodex-1.1-mini:free", 0.2, 2,
+     "nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free", "beschlussvorlagen"),
     ("klimaschutzkonzept", "🎯", "Klimaschutzkonzept",
      "Aufbau und Inhalte eines kommunalen Klimaschutzkonzepts: Ist-Bilanz, Zielbild, Sektoren, Monitoring.",
-     "nvidia/nemotron-3-super-120b-a12b:free", 0.2, 3),
+     "thinkingmachines/inkling:free", 0.2, 3,
+     "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free", ""),
     ("massnahmenplanung", "🧭", "Maßnahmenplanung Mobilität",
      "Priorisierter Maßnahmenkatalog für nachhaltige Mobilität mit Kosten, Wirkung, KPIs und Phasenplanung.",
-     "thinkingmachines/inkling:free", 0.2, 4),
+     "google/gemma-4-26b-a4b-it:free", 0.2, 4,
+     "thinkingmachines/inkling:free,nvidia/nemotron-3-super-120b-a12b:free", ""),
     ("wegeplanung", "🚲", "Wegeplanung Fahrrad",
      "Konkrete Radtrassen zwischen Orten: Trennungsformen, Standards (FAVR/DVFS), Kosten und Bauabfolge.",
-     "google/gemma-4-31b-it:free", 0.2, 5),
+     "google/gemma-4-31b-it:free", 0.2, 5,
+     "nvidia/nemotron-3-super-120b-a12b:free,thinkingmachines/inkling:free", "wegeplanung"),
     ("argumentation", "🗣️", "Argumentationshilfe intern",
      "Faktenbasierte Argumente und Entkräftung typischer Gegenargumente für interne Gremien – mit Quellen.",
-     "nvidia/nemotron-3.5-lightning:free", 0.3, 6),
+     "nvidia/nemotron-3.5-lightning:free", 0.3, 6,
+     "google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-super-120b-a12b:free", "argumentation"),
     ("opnv-planung", "🚌", "ÖPNV-Planung",
      "Takt, Frequenzen und Streckenkonzepte für Bus und Schiene nach Versorgungsgrad und Fahrgastaufkommen.",
-     "apodex/apodex-1.1-mini:free", 0.2, 7),
+     "nvidia/nemotron-3-super-120b-a12b:free", 0.2, 7,
+     "apodex/apodex-1.1-mini:free,google/gemma-4-31b-it:free", "opnv-planung"),
+    ("verkehrssicherheit", "🚸", "Verkehrssicherheit & Schulweg",
+     "Unfallauswertung, Gefahrenstellen-Ranking und Maßnahmenliste für Schulwege und Unfallschwerpunkte.",
+     "google/gemma-4-31b-it:free", 0.2, 8,
+     "nvidia/nemotron-3-super-120b-a12b:free,nvidia/nemotron-3.5-lightning:free", "verkehrssicherheit"),
+    ("ladeinfrastruktur", "🔌", "Ladeinfrastruktur-Konzept",
+     "Standort- und Bedarfsanalyse, Ausbaustufen und Fördermittel für öffentliche Ladeinfrastruktur.",
+     "nvidia/nemotron-3-super-120b-a12b:free", 0.2, 9,
+     "google/gemma-4-26b-a4b-it:free,apodex/apodex-1.1-mini:free", "ladeinfrastruktur"),
+    ("parkraum", "🅿️", "Parkraum & Bewirtschaftung",
+     "Parkraumbilanz, Tarif- und Bewirtschaftungsvorschlag inklusive Beschlussvorlage und Argumenten.",
+     "nvidia/nemotron-3-super-120b-a12b:free", 0.2, 10,
+     "google/gemma-4-26b-a4b-it:free,apodex/apodex-1.1-mini:free", "parkraum"),
+]
+
+# Modell-Korrekturen für Bestandsdatenbanken (nur wenn die Kachel noch auf dem
+# alten Default stand). Qwen hatte laut Plan keinen aktiven Provider (Endpunktliste leer).
+MODELL_MIGRATION = [
+    ("beschlussvorlagen", "qwen/qwen3.8-27b:free", "apodex/apodex-1.1-mini:free"),
+    ("klimaschutzkonzept", "nvidia/nemotron-3-super-120b-a12b:free", "thinkingmachines/inkling:free"),
+    ("massnahmenplanung", "thinkingmachines/inkling:free", "google/gemma-4-26b-a4b-it:free"),
+    ("opnv-planung", "apodex/apodex-1.1-mini:free", "nvidia/nemotron-3-super-120b-a12b:free"),
 ]
 
 # Gratis-Modelle (OpenRouter, Stand 10/2026 – Liste im Admin-Bereich live abrufbar).
@@ -247,6 +278,86 @@ AUSGABE:
 STYLE: planerisch, tabellarisch, Annahmen benennen. Keine fiktiven Fahrgastzahlen – Schätzungen als solche markieren."""
 }
 
+PROMPTS["verkehrssicherheit"] = """Du bist Fachgutachter:in für Verkehrssicherheit und Schulwegsicherheit in deutschen Kommunen, mit Praxis in der Unfallkommission (Örtliche Unfalluntersuchung nach StVO/StVUmgang) und in der Schulwegplanung.
+
+ARBEITSWEISE:
+1. Rückfragen (max. 4): Welches Gebiet/welcher Schulbezirk? Welcher Zeitraum (3–5 Jahre)? Liegt die Unfallstatistik der Polizei vor (Unfallkategorie: VU mit Personenschaden, schwerer Unfall mit Personenschaden, Unfall mit Getöteten)? Wie viele Schulwege/Querungen sind betroffen, welche Altersgruppe?
+2. Wenn keine amtliche Statistik vorliegt: Arbeite mit den Angaben der Kommune und kennzeichne jede Zahl als Angabe der Kommune, nicht als Statistik.
+3. Bewerte nach Schwere, nicht nur nach Anzahl: Unfälle mit Getöteten und schweren Personenschäden zählen mehrfach. Nutze, wenn vorhanden, die vorberechneten Werte des Rechenkerns (Ranking) und übernimm sie unverändert.
+4. Prüfe immer die drei Ebenen: baulich (Querung, Sichtfeld, Geschwindigkeit, Trennung), organisatorisch (Schulwegsicherung, Verkehrsüberwachung, Hol-/Bringzonen) und rechtlich (Anordnung nach § 45 StVO, Tempo-30-Zonen, Verkehrszeichen).
+
+FACHWERTE ALS FALLBACK (nur wenn die Kommune nichts anderes angibt, als Annahme kennzeichnen):
+- Schulwege: empfohlene Querungsstellen mit Sichtfeldern, Mittellinsel ab ca. 6–8 m Fahrbahnbreite, Querungshilfe/Hilfsmittel
+- Verkehrsberuhigung: Tempo-30-Zone/Tempo 30 vor Schulen und Kitas, verkehrsberuhigter Bereich
+- Schulweglänge: Grundschule bis ca. 1–1,5 km, weiterführende Schule bis ca. 3–5 km als Zumutbarkeitsrahmen
+- Typische Maßnahmenkosten (Richtwerte, keine Angebote): Querungshilfe 25–80 k€, Mittelinsel 40–120 k€, Bordsteinabsenkung 5–15 k€, Verkehrszeichen/Zebrastreifen 3–12 k€, Fahrradbügel 300–700 € je Platz
+
+AUSGABESTRUKTUR:
+1) Datenbasis & Annahmen (Quelle und Zeitraum der Unfalldaten klar benennen)
+2) Gefahrenstellen-Ranking als Tabelle: Stelle | Unfälle | davon schwer | Verletzte | Punkte | Kategorie
+3) Maßnahmen je Top-Stelle als Tabelle: Stelle | Maßnahme | Priorität | Kosten (Band) | Zuständigkeit | Zeithorizont
+4) Rechtliche Anordnungsbausteine (nur belegen, was nach StVO möglich ist)
+5) Fördermöglichkeiten (nur als Annahme, mit Prüfhinweis)
+6) Nächste Schritte (max. 3), inkl. Beteiligung von Polizei, Ordnungsamt und Schulleitung
+
+STYLE: Deutsch, sachlich, Gutachtenstil. Erfinde niemals Unfallzahlen, Fristen oder Fördersätze – fehlende Daten sind Lücken und werden als solche benannt. Zahlen immer mit Einheit."""
+
+PROMPTS["ladeinfrastruktur"] = """Du bist Expert:in für kommunale Ladeinfrastruktur (AC/DC) und Elektromobilität mit Kenntnis von AFID/KDG-Anforderungen, Netzanschlussfragen und kommunalen Betreibermodellen.
+
+AUFGABE: Erstelle mit der Kommune ein Ladeinfrastruktur-Konzept: Bedarf, Standorte, Ausbaustufen, Betrieb und Förderung.
+
+ARBEITSWEISE:
+1. Rückfragen (max. 4): Pkw-Bestand und E-Quote der Kommune, Zielquote/Jahr, vorhandene öffentliche Ladepunkte und deren Auslastung, Anteil Laternenparker/ohne eigene Lademöglichkeit, verfügbare Flächen und Netzanschlusspunkte, gewünschtes Betreibermodell (Stadtwerke, Dritter, Kommune selbst).
+2. Bedarfsrechnung: Bedarf entsteht aus E-Pkw × Anteil ohne eigene Lademöglichkeit; Aufteilung AC/DC und Ladepunkte je Fahrzeug als Annahme setzen. Wenn vorberechnete Werte des Rechenkerns vorliegen: unverändert übernehmen, nicht nachrechnen.
+3. Technik: AC 11/22 kW für Ziele und Laternenparken, DC 50–350 kW für Schnellladen an Hauptachsen und Bahnhöfen; Leistungsbedarf mit Gleichzeitigkeitsfaktor ausweisen.
+4. Standortkriterien: Erreichbarkeit, Aufenthaltsdauer, Netzanschluss, Konflikte (Stellplätze, Baumschutz, Schulwege), Diskriminierungsfreiheit/Barrierefreiheit.
+5. Betrieb und Recht: Betreibermodell, Preisgestaltung, Satzung/Stellplatzpflicht, Beschilderung, Lade- und Parkordnung, Abrechnung (Ad-hoc und Roaming, Preisangabenverordnung).
+
+FACHWERTE ALS FALLBACK (nur wenn die Kommune nichts anderes angibt; als Annahme kennzeichnen):
+- Richtwerte Bedarf: 1 öffentlicher Ladepunkt je 8–15 Pkw ohne eigene Lademöglichkeit (AC), 1 Schnellladepunkt je 60–100 E-Pkw (DC)
+- Investitionsrichtwerte: AC-Ladepunkt 4–9 k€, DC-Standort 50–120 k€ (je nach Leistung und Tiefbau), Netzanschluss gesondert
+- Auslastungsschwelle für Ausbau: dauerhaft über 50–60 % Belegung in der Hauptzeit
+- Förderung: nur als „Programm prüfen“ benennen, niemals Fördersätze festschreiben
+
+AUSGABESTRUKTUR:
+1) Datenbasis & Annahmen
+2) Bedarf heute und im Zielbild als Tabelle: Jahr | E-Pkw | Ladepunkte AC | Ladepunkte DC | Leistungsbedarf | Investitionsband
+3) Ausbaustufen mit Zeithorizont und Maßnahmen
+4) Standortkriterien und Vorschlagsliste (nur benannte Orte, keine erfundene Geodaten)
+5) Betriebsmodell, Preisgestaltung und Rechtsrahmen
+6) Förder- und Finanzierungsansatz mit Prüfhinweis
+7) Nächste Schritte (max. 3)
+
+STYLE: Deutsch, präzise. Keine erfundenen Zulassungszahlen, Förderquoten oder Netzanschlusskosten. Jede Annahme sichtbar markieren."""
+
+PROMPTS["parkraum"] = """Du bist Fachplaner:in für Parkraummanagement und Parkraumbewirtschaftung in deutschen Kommunen (Methodik nach EAR/EAHV, Parkraummanagement-Leitfäden).
+
+AUFGABE: Erstelle mit der Kommune eine Parkraumbilanz und daraus einen Bewirtschaftungsvorschlag inklusive Beschlussvorlage und Argumenten für die Politik.
+
+ARBEITSWEISE:
+1. Rückfragen (max. 4): Welches Gebiet (Innenstadt, Quartier, Bahnhofsumfeld)? Wie viele öffentliche Parkstände, wie hoch ist die Auslastung zur Hauptzeit? Gibt es Bewohnerparken, wie viele Ausweise? Welche Gebühren gelten heute, wie dicht ist die Kontrolle? Welche Ziele verfolgt die Politik (Einnahmen, Aufenthaltsqualität, ÖPNV-Anteil, Lieferverkehr)?
+2. Bilanz: Parkstände, Auslastung, freie Stände, Umschlag; Bewertung „ausreichend“ oder „Bewirtschaftung/Erweiterung prüfen“ (Schwelle ca. 85–90 % Auslastung).
+3. Vorschlag: Tarifstruktur (Kurzzeit, Bewohner, Beschäftigte, Lieferverkehr), Bewirtschaftungszeiten, Kontrolle, Digitalisierung (App/Parkscheibe), Ausnahmen (Behindertenparkplätze, Ladeplätze, Lieferzonen).
+4. Rechtlicher Rahmen: § 45 StVO, Parkgebührenordnungen, Landesrecht, Bewohnerparkverordnung; Vorgaben nur benennen, wenn sie tatsächlich gelten.
+5. Argumente: Einnahmen und Amortisation, Aufenthaltsqualität, Lenkungswirkung, Einzelhandel, ÖPNV-Verknüpfung, Lieferverkehr; je These ein Gegenargument mit Entkräftung.
+
+FACHWERTE ALS FALLBACK (als Annahme kennzeichnen):
+- Auslastungsbewertung: unter 75 % ausreichend, 75–85 % beobachten, über 85 % Handlungsbedarf
+- Bewirtschaftungskosten 200–320 € je Stellplatz und Jahr, Einnahmen je bewirtschaftetem Stellplatz 400–900 €/Jahr (sehr abhängig von Tarif und Kontrolle)
+- Erstausstattung ca. 1.000–1.500 € je Stellplatz (Automat, Beschilderung, Umzeichnung)
+- Erweiterung des Parkraums: 15–35 k€ je Stellplatz (Parkplatz), Parkhaus 25–45 k€ je Stellplatz – nur als Größenordnung
+
+AUSGABESTRUKTUR:
+1) Datenbasis & Annahmen
+2) Parkraumbilanz als Tabelle (Bestand, Auslastung, freie Stände, Kennzahl)
+3) Bewirtschaftungsvorschlag (Tarif, Zeiten, Gebiete, Ausnahmen)
+4) Wirtschaftlichkeit als Tabelle: Einnahmen | Kosten | Überschuss | Amortisation
+5) Rechtliche Umsetzung und Beschilderung
+6) Argumente/Gegenargumente-Tabelle
+7) Beschlussvorschlag im Konjunktiv I + Prüfliste + Nächste Schritte
+
+STYLE: Deutsch, verwaltungsnah, prüffähig. Keine erfundenen Gebührensätze oder Rechtsgrundlagen – was fehlt, wird als Lücke benannt."""
+
 STANDARDWERTE = {
 "co2-bilanz": [
     ("basisjahr", "Basisjahr der Bilanz", "Auf welches Jahr bezieht sich die Bilanz?", "2023", "", 1),
@@ -290,6 +401,28 @@ STANDARDWERTE = {
 ],
 }
 
+STANDARDWERTE["verkehrssicherheit"] = [
+    ("gebiet", "Gebiet / Schulbezirk", "Kernbereich der Auswertung", "", "", 1),
+    ("zeitraum", "Auswertungszeitraum", "z. B. „2022–2025“", "", "", 2),
+    ("datenquelle", "Datenquelle der Unfallzahlen", "z. B. Polizei-Unfallstatistik, Unfallkommission", "", "", 3),
+    ("schulform", "Fokus Schulform", "Grundschule / weiterführende Schule / beide", "Grundschule", "", 4),
+    ("gewichte_schwer", "Gewichtung schwerer Unfälle", "Faktor im Ranking", "5", "Faktor", 5),
+]
+STANDARDWERTE["ladeinfrastruktur"] = [
+    ("pkw_bestand", "Pkw-Bestand der Kommune", "Zulassungszahlen, gerundet", "", "Pkw", 1),
+    ("e_quote_heute", "E-Anteil heute", "Anteil batterieelektrischer Pkw", "", "%", 2),
+    ("zielquote", "Ziel-E-Anteil", "Zieljahr und Quote, z. B. „2030: 22 %“", "", "%", 3),
+    ("ladepunkte_vorhanden", "Öffentliche Ladepunkte heute", " öffentlich zugängliche Ladepunkte", "", "Ladepunkte", 4),
+    ("betreibermodell", "Gewünschtes Betreibermodell", "z. B. Stadtwerke, Dritter, Kommune", "", "", 5),
+]
+STANDARDWERTE["parkraum"] = [
+    ("gebiet", "Untersuchungsgebiet", "z. B. Innenstadt, Bahnhofsumfeld", "", "", 1),
+    ("parkstaende", "Öffentliche Parkstände", "im Gebiet", "", "Stück", 2),
+    ("auslastung", "Auslastung Hauptzeit", "Spitzenauslastung in Prozent", "", "%", 3),
+    ("tarif", "Geltender Tarif", "z. B. „1,00 €/h, Mo–Sa 9–18 Uhr“", "", "", 4),
+    ("bewohnerparken", "Bewohnerparken", "Anzahl Ausweise / Gebiete", "", "", 5),
+]
+
 SUGGESTIONS = {
 "co2-bilanz": [
     "Wir wollen die Bilanz für 2024 erstellen. Fuhrpark: 25 Diesel-Pkw (Ø 28.000 km/Jahr), 4 E-Pkw (Ø 22.000 km), 3 Diesel-Busse (Ø 85.000 km, Belegung Ø 38 Fahrgäste).",
@@ -320,6 +453,19 @@ SUGGESTIONS = {
     "Wir wollen 30-Minuten-Takt im Stadtbus einführen. Was brauchen wir (Fahrzeuge, Kosten, Fahrer)?",
 ],
 }
+
+SUGGESTIONS["verkehrssicherheit"] = [
+    "Wir wollen die Schulwege im Kernort sicherer machen. Es liegen Unfallzahlen der Polizei für 2022–2025 vor, Schwerpunkt Hauptstraße und Bahnhofskreuzung. Erstelle Ranking und Maßnahmenliste.",
+    "Welche Daten und Auswertungen braucht die Unfallkommission, um einen Unfallschwerpunkt offiziell festzustellen?",
+]
+SUGGESTIONS["ladeinfrastruktur"] = [
+    "Kommune mit 12.000 Pkw, E-Anteil 4 %, 14 öffentliche Ladepunkte. Wir wollen bis 2030 auf 22 % E-Anteil kommen. Wie viele Ladepunkte brauchen wir und welche Ausbaustufen schlägst du vor?",
+    "Welche Standortkriterien gelten für Schnellladepunkte und welche Fördermöglichkeiten gibt es (nur mit Prüfhinweis)?",
+]
+SUGGESTIONS["parkraum"] = [
+    "Innenstadt mit 850 öffentlichen Parkständen, Auslastung 92 % zur Hauptzeit, heute gebührenfrei. Erstelle Bilanz, Bewirtschaftungsvorschlag mit Wirtschaftlichkeit und eine Beschlussvorlage.",
+    "Wie argumentiere ich gegenüber dem Einzelhandel für die Einführung von Parkgebühren?",
+]
 
 TESTFAELLE = {
 "co2-bilanz": [
@@ -360,6 +506,26 @@ TESTFAELLE = {
 }
 
 
+TESTFAELLE["verkehrssicherheit"] = [
+    ("Beispiel: Schulweg-Ranking aus Unfallliste",
+     "Werte die Unfallliste für den Schulbezirk aus, erstelle das Gefahrenstellen-Ranking mit Gewichtung schwerer Unfälle und leite je Top-Stelle eine Maßnahme mit Kostenband und Zuständigkeit ab. Zeitraum 2022–2025, Quelle Polizei-Unfallstatistik.",
+     "ort;schwere;art;anzahl;verletzte\nHauptstraße/Schulweg;schwer;Fußgänger;2;2\n"
+     "Kreuzung Bahnhof;leicht;Rad;5;1\nHauptstraße/Schulweg;leicht;Rad;3;0\n"
+     "Grundschule Nord;schwer;Schulweg;1;1\nKreuzung Bahnhof;schwer;Rad;1;1\n"
+     "Bahnhofstraße Kita;leicht;Fußgänger;4;0"),
+]
+TESTFAELLE["ladeinfrastruktur"] = [
+    ("Beispiel: 12.000 Pkw, Ziel 22 % bis 2030",
+     "Kommune: 12.000 Pkw, E-Anteil heute 4 %, 14 öffentliche Ladepunkte, 55 % Laternenparker. Ziel 22 % E-Anteil 2030. Erstelle Bedarfsrechnung, Ausbaustufen und Standortkriterien.",
+     "pkw_bestand;e_anteil;ladepunkte\n12000;0,04;14"),
+]
+TESTFAELLE["parkraum"] = [
+    ("Beispiel: Innenstadt 850 Stellplätze, 92 % Auslastung",
+     "Innenstadt: 850 öffentliche Parkstände, 92 % Auslastung Hauptzeit, 300 bewirtschaftete Stellplätze geplant, Tarif 1,00 €/h. Erstelle Bilanz, Wirtschaftlichkeit, Bewirtschaftungsvorschlag und Beschlussvorschlag.",
+     "gebiet;parkstaende;auslastung_prozent\nInnenstadt;850;92"),
+]
+
+
 def _now() -> str:
     from datetime import datetime, timezone
 
@@ -379,12 +545,25 @@ def _tile_model(tid: str) -> str:
 
 
 def _migrate() -> None:
-    """Alte (kostenpflichtige) Default-Modelle auf Gratis-Modelle umstellen
-    und sachliche Prompt-Korrekturen anwenden – nur wenn unverändert."""
+    """Bestandsdatenbanken aktualisieren:
+
+    * alte (kostenpflichtige) Default-Modelle → jeweiliges Gratis-Modell,
+    * Modell-Korrekturen, wenn ein Modell keinen aktiven Endpunkt mehr hat
+      (Qwen-Fund aus dem Plan) – nur wenn die Kachel noch auf dem alten Default stand,
+    * fehlende Kacheln/Prompts/Standardwerte/Testfälle ergänzen (neue Kacheln),
+    * sachliche Prompt-Korrekturen, wenn der Prompt unverändert ist.
+    """
     for tid, model in [(t[0], t[4]) for t in TILES]:
         row = db.query1("SELECT model FROM tiles WHERE id=?", (tid,))
         if row and row["model"] in ALTE_DEFAULT_MODELLE:
             db.exec("UPDATE tiles SET model=? WHERE id=?", (model, tid))
+
+    for tid, alt, neu in MODELL_MIGRATION:
+        row = db.query1("SELECT model FROM tiles WHERE id=?", (tid,))
+        if row and row["model"] == alt:
+            db.exec("UPDATE tiles SET model=? WHERE id=?", (neu, tid))
+
+    _ensure_tiles()
 
     for tid, old, new in PROMPT_FIXES:
         row = db.query1("SELECT system_prompt FROM prompts WHERE tile_id=?", (tid,))
@@ -401,13 +580,53 @@ def _migrate() -> None:
         )
 
 
+def _ensure_tiles() -> None:
+    """Ergänzt Kacheln, die in der Datenbank fehlen (z. B. neue Kacheln nach Update)."""
+    ts = _now()
+    for t in TILES:
+        tid, emoji, name, short, model, temp, sort, fallbacks, rechner = t
+        row = db.query1("SELECT id, fallback_models, rechner FROM tiles WHERE id=?", (tid,))
+        if row:
+            sets, params = [], []
+            if not row["fallback_models"] and fallbacks:
+                sets.append("fallback_models=?"); params.append(fallbacks)
+            if not row["rechner"] and rechner:
+                sets.append("rechner=?"); params.append(rechner)
+            if sets:
+                db.exec(f"UPDATE tiles SET {', '.join(sets)} WHERE id=?", (*params, tid))
+            continue
+        db.exec(
+            "INSERT INTO tiles (id, emoji, name, short, model, temperature, sort, fallback_models, rechner) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (tid, emoji, name, short, model, temp, sort, fallbacks, rechner),
+        )
+        prompt = PROMPTS.get(tid, "Du bist ein hilfsbereiter Experte.")
+        db.exec("INSERT INTO prompts (tile_id, system_prompt, updated_at) VALUES (?,?,?)", (tid, prompt, ts))
+        db.exec(
+            "INSERT INTO prompt_versions (tile_id, system_prompt, model, created_at) VALUES (?,?,?,?)",
+            (tid, prompt, model, ts),
+        )
+        for key, label, desc, dflt, unit, srt in STANDARDWERTE.get(tid, []):
+            db.exec(
+                "INSERT INTO standardwerte (tile_id, key, label, description, default_value, unit, sort) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (tid, key, label, desc, dflt, unit, srt),
+            )
+        for name_tc, msg, file_c in TESTFAELLE.get(tid, []):
+            db.exec(
+                "INSERT INTO test_cases (tile_id, name, message, file_content, created_at) VALUES (?,?,?,?,?)",
+                (tid, name_tc, msg, file_c, ts),
+            )
+
+
 def _insert_all() -> None:
     ts = _now()
     with db.get() as conn:
-        for tid, emoji, name, short, model, temp, sort in TILES:
+        for tid, emoji, name, short, model, temp, sort, fallbacks, rechner in TILES:
             conn.execute(
-                "INSERT INTO tiles (id, emoji, name, short, model, temperature, sort) VALUES (?,?,?,?,?,?,?)",
-                (tid, emoji, name, short, model, temp, sort),
+                "INSERT INTO tiles (id, emoji, name, short, model, temperature, sort, fallback_models, rechner) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (tid, emoji, name, short, model, temp, sort, fallbacks, rechner),
             )
             prompt = PROMPTS.get(tid, "Du bist ein hilfsbereiter Experte.")
             conn.execute(

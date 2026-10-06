@@ -211,3 +211,49 @@ input[type="range"] { padding: 0; }
 .spin { display: inline-block; animation: rot 1s linear infinite; }
 @keyframes rot { to { transform: rotate(360deg); } }
 .toast { position: fixed; bottom: 1.4rem; left: 50%; transform: translateX(-50%); background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 1.1rem; font-size: 0.85rem; z-index: 50; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+
+/* ---------- Phase 1/2: Rechner, Artefakte, Kennzahlen ---------- */
+.rechnerres, .artefakte { margin-top: 0.9rem; }
+.rechnerres h4 { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin: 0.8rem 0 0.3rem; }
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0.5rem; }
+.kv > div { background: var(--card2); border: 1px solid var(--border); border-radius: 9px; padding: 0.5rem 0.7rem; display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.82rem; }
+.kv > div span { color: var(--muted); }
+.tablewrap { overflow-x: auto; margin: 0.4rem 0 0.8rem; }
+.tablewrap table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.tablewrap th { text-align: left; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); padding: 0.35rem 0.5rem; white-space: nowrap; }
+.tablewrap td { border-bottom: 1px solid var(--border); padding: 0.35rem 0.5rem; vertical-align: top; }
+.rechenweg { margin-top: 0.7rem; }
+.rechenweg summary { cursor: pointer; color: var(--muted); font-size: 0.8rem; }
+.rechenweg ul { margin: 0.4rem 0 0 1.1rem; font-size: 0.8rem; color: var(--muted); }
+.artefakte .arthead { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.4rem; }
+.artefakte .chip { display: inline-flex; gap: 0.35rem; align-items: center; background: var(--card2); border: 1px solid var(--border); border-radius: 999px; padding: 0.28rem 0.7rem; font-size: 0.78rem; margin: 0 0.35rem 0.35rem 0; }
+.artefakte .chip a.dl { color: var(--accent); text-decoration: none; }
+.artefakte .chip .print { color: var(--accent); cursor: pointer; text-decoration: underline; }
+.exportbar { border-top: 1px dashed var(--border); padding-top: 0.7rem; }
+.chipbtn { display: inline-block; background: var(--card2); border: 1px solid var(--border); border-radius: 999px; padding: 0.3rem 0.75rem; font-size: 0.78rem; cursor: pointer; margin: 0 0.35rem 0.35rem 0; }
+.chipbtn:hover { border-color: var(--accent2); }
+.retryhint { font-size: 0.75rem; color: #fbbf24; margin-top: 0.3rem; }
+.msg .meta { font-size: 0.7rem; color: var(--muted); margin-top: 0.4rem; font-family: var(--mono); }
+.syswrap { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 0.6rem; }
+.kpi { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 0.8rem; }
+.kpi .l { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.kpi .v { font-size: 1.15rem; font-weight: 700; margin: 0.15rem 0; }
+.kpi .h { font-size: 0.7rem; color: var(--muted); }
+.pill { display: inline-block; font-family: var(--mono); font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 6px; border: 1px solid var(--border); background: var(--card2); }
+.pill.ok { border-color: var(--ok); color: var(--ok); }
+.pill.bad { border-color: var(--err); color: var(--err); }
+.pill.unk { color: var(--muted); }
+.good { color: var(--ok); } .mid { color: #fbbf24; } .bad { color: var(--err); }
+.evalrow { font-size: 0.82rem; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+.evalrow b { margin-right: 0.4rem; }
+
+/* ---------- Druck (PDF-Weg A aus dem Plan): Chat/Ergebnis drucken ---------- */
+@media print {
+  .topbar, .foot, .convs, .composer, .filechips, .stdpanel, .actions, .artefakte .chip a.dl,
+  .artefakte .chip .print, .exportbar, .examplebar, .toast { display: none !important; }
+  body, .view, .chat, #msgArea { background: #fff !important; color: #111 !important; }
+  .msg { border: none !important; box-shadow: none !important; page-break-inside: avoid; }
+  .msg.bot .body table { font-size: 9pt; }
+  a[href]:after { content: ""; }
+}

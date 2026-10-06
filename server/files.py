@@ -1,10 +1,29 @@
-"""Text-Extraktion aus hochgeladenen Dateien (für den LLM-Kontext)."""
+"""Text-Extraktion aus hochgeladenen Dateien (für den LLM-Kontext) + Bild-Erkennung."""
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 MAX_FILE_CHARS = 12_000  # pro Datei
 TEXT_EXTS = {".txt", ".md", ".csv", ".tsv", ".log", ".json"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+MIME_BY_EXT = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
+}
+
+
+def is_image(path: Path, mime: str = "") -> bool:
+    """Bilddateien werden nicht text-extraniert, sondern multimodal ans Modell gegeben (Plan 4.4)."""
+    ext = Path(path).suffix.lower()
+    return ext in IMAGE_EXTS or mime.startswith("image/")
+
+
+def image_data_url(path: Path, mime: str = "") -> str:
+    """Bild als Data-URL (OpenRouter/OpenAI-Format für Vision-Modelle)."""
+    p = Path(path)
+    typ = mime or MIME_BY_EXT.get(p.suffix.lower(), "image/png")
+    return f"data:{typ};base64,{base64.b64encode(p.read_bytes()).decode('ascii')}"
 
 
 def _truncate(text: str) -> str:
@@ -58,4 +77,4 @@ def extract_text(path: Path) -> str:
     return ""
 
 
-SUPPORTED = " .txt .md .csv .tsv .log .json .xlsx .docx .pdf "
+SUPPORTED = " .txt .md .csv .tsv .log .json .xlsx .docx .pdf .png .jpg .jpeg .webp .gif .bmp "

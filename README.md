@@ -2,45 +2,61 @@
 
 Kommunale Kachel-App für **Mobilitätsmanagement & nachhaltige Mobilität**.
 Jede Kachel = eine Aufgabenstellung (CO₂-Bilanz, Beschlussvorlagen, ÖPNV-Planung, …).
-Die Kommune lädt Material hoch, chatted mit dem Fach-Bot (via **OpenRouter**, Modell je Kachel wählbar),
-erhält Rückfragen und am Ende ein strukturiertes Ergebnis.
+Die Kommune lädt Material hoch, chatted mit dem Fach-Bot (via **OpenRouter**, Modell je Kachel
+wählbar), erhält Rückfragen und am Ende ein **prüfbares Ergebnisdokument mit Export**
+(Excel, CSV, JSON, Markdown, Diagramme, PDF/Druck) und – wo sinnvoll – **berechnete Zahlen
+aus einem Python-Rechenkern** statt aus dem Sprachmodell.
 
-## Kacheln
+Der Umsetzungsstand des zugehörigen Plans steht in [`plan.md`](plan.md);
+die Anleitung für eine öffentlich erreichbare Test-Homepage in
+[`docs/TESTHOMEPAGE.md`](docs/TESTHOMEPAGE.md).
 
-Alle Kacheln laufen per Default auf **Gratis-Modellen** (OpenRouter, `:free`). Die Liste im
-Admin-Bereich wird live von OpenRouter geladen; eigene (auch kostenpflichtige) Modell-IDs
-bleiben möglich. Free-Tier-Limits: ca. 20 Requests/Minute und 50/Tag (1.000/Tag ab 10 $ Guthaben).
+## Kacheln (10)
 
-| Kachel | Beispiel-Unterhaltung | Modell (Default, gratis) |
-|---|---|---|
-| 🌍 CO₂-Bilanz | Fuhrpark-Bilanz 2024 (mit CSV) | `nvidia/nemotron-3-ultra-550b-a55b:free` |
-| 📄 Beschlussvorlagen & Förderanträge | Beschlussvorlage E-Bus-Erwerb | `qwen/qwen3.8-27b:free` |
-| 🎯 Klimaschutzkonzept | Kleinstadt 15.000 EW | `nvidia/nemotron-3-super-120b-a12b:free` |
-| 🧭 Maßnahmenplanung Mobilität | Maßnahmenkatalog Mittelstadt | `thinkingmachines/inkling:free` |
-| 🚲 Wegeplanung Fahrrad | Radtrasse Nord → Gesamtschule (mit CSV) | `google/gemma-4-31b-it:free` |
-| 🗣️ Argumentationshilfe intern | Argumente zur E-Bus-Wirtschaftlichkeit | `nvidia/nemotron-3.5-lightning:free` |
-| 🚌 ÖPNV-Planung | Landbus-Taktkonzept 12 km | `apodex/apodex-1.1-mini:free` |
+Alle Kacheln laufen per Default auf **Gratis-Modellen** (OpenRouter, `:free`) und haben eine
+**Fallback-Kette von drei Modellen**: Fällt ein Anbieter aus (429, 5xx, kein aktiver Endpunkt),
+versucht die App automatisch das nächste Modell. Free-Tier-Limits: ca. 20 Requests/Minute und
+50/Tag (1.000/Tag ab einmalig 10 $ Guthaben).
 
-Neue Kacheln: Eintrag in `server/seed.py` (`TILES`, `PROMPTS`, optional `STANDARDWERTE`, `SUGGESTIONS`, `TESTFAELLE`) + Server-Neustart (Seed läuft nur bei leerer DB).
+| Kachel | Modell (Default, gratis) | Fallbacks | Rechenkern |
+|---|---|---|---|
+| 🌍 CO₂-Bilanz | `nvidia/nemotron-3-ultra-550b-a55b:free` | Nemotron Super, Gemma 4 31B | ✅ Fuhrpark-Bilanz mit Emissionsfaktoren |
+| 📄 Beschlussvorlagen & Förderanträge | `apodex/apodex-1.1-mini:free` | Nemotron Super, Gemma 4 31B | ✅ TCO Diesel vs. Elektro |
+| 🎯 Klimaschutzkonzept | `thinkingmachines/inkling:free` | Nemotron Ultra, Nemotron Super | – |
+| 🧭 Maßnahmenplanung Mobilität | `google/gemma-4-26b-a4b-it:free` | Inkling, Nemotron Super | – |
+| 🚲 Wegeplanung Fahrrad | `google/gemma-4-31b-it:free` | Nemotron Super, Inkling | ✅ Kostenband & Budgetdeckung |
+| 🗣️ Argumentationshilfe intern | `nvidia/nemotron-3.5-lightning:free` | Gemma 4 26B, Nemotron Super | ✅ TCO-Zahlen |
+| 🚌 ÖPNV-Planung | `nvidia/nemotron-3-super-120b-a12b:free` | Apodex, Gemma 4 31B | ✅ Umlaufzeit, Fahrzeugbedarf, Taktstufen |
+| 🚸 Verkehrssicherheit & Schulweg | `google/gemma-4-31b-it:free` | Nemotron Super, Lightning | ✅ Unfall-CSV → Gefahrenstellen-Ranking |
+| 🔌 Ladeinfrastruktur-Konzept | `nvidia/nemotron-3-super-120b-a12b:free` | Gemma 4 26B, Apodex | ✅ Ladebedarf & Ausbaustufen |
+| 🅿️ Parkraum & Bewirtschaftung | `nvidia/nemotron-3-super-120b-a12b:free` | Gemma 4 26B, Apodex | ✅ Bilanz, Überschuss, Amortisation |
 
-Beim Start werden außerdem automatisch migriert: alte Default-Modelle → Gratis-Modelle
-(nur wenn die Kachel noch auf dem alten Default stand) und sachliche Prompt-Korrekturen
-(nur wenn der Prompt unverändert ist).
+Neue Kacheln: Eintrag in `server/seed.py` (`TILES`, `PROMPTS`, optional `STANDARDWERTE`,
+`SUGGESTIONS`, `TESTFAELLE`) + Rechenkern in `server/rechner.py` + Schema in
+`server/schemas.py`. Server-Neustart genügt – fehlende Kacheln werden automatisch ergänzt.
 
-## Beispiel-Unterhaltungen („Beispiele ansehen“)
+## Was die App kann
 
-Jede Kachel bringt eine **fest gespeicherte Beispiel-Unterhaltung** mit (`server/examples.py`),
-die den vollständigen Durchlauf zeigt – Rückfragen, Annahmen, Tabellen, Ergebnis:
-
-- Aufruf über die Startseite („📘 Beispiel ansehen“) oder `#/tile/<kachel>/beispiel`.
-- Beispiele sind **schreibgeschützt** (Chat/Löschen antworten mit 403) und in der Seitenleiste
-  getrennt von eigenen Unterhaltungen gelistet.
-- Button **„Als eigene Unterhaltung übernehmen“** kopiert Nachrichten + Dateien in eine
-  bearbeitbare Unterhaltung (`POST /api/conversations/{id}/duplicate`).
-- **Mit echtem Modell neu erzeugen:** Admin-Bereich → Kachel → „🔁 Beispiel neu erzeugen“
-  (`POST /api/admin/examples/regenerate[?tile_id=...]`). Läuft gegen das aktuell konfigurierte
-  Modell und dieselben Prompts/Dateien; ohne `tile_id` werden alle Beispiele neu erzeugt.
-  Achtung Free-Tier-Limit (1 Request je Assistenten-Antwort).
+* **Chat mit Fach-Prompts**, Streaming (SSE), Rückfragen, Standardwerte je Kommune.
+* **Fallback-Kette + Health-Check**: Prüft über die OpenRouter-Endpunktliste, ob ein Modell
+  aktive Anbieter hat (genau der Qwen-Fall aus dem Plan) und weicht automatisch aus.
+* **Ratenlimit-Behandlung**: 429/5xx mit `Retry-After` und exponentiellem Backoff.
+* **Kostenmessung**: jeder Request landet in `llm_calls` (Tokens, Cache, Kosten, Dauer,
+  Fallback, Fehler). Admin → „📈 Kosten, Health & Eval“ zeigt Kennzahlen je Kachel/Modell/Tag.
+* **Audit-Log**: wer hat wann welches Ergebnis erzeugt, welche Datei hochgeladen, welcher
+  Prompt geändert.
+* **Rechnen im Code**: Zufuhr der berechneten Werte als verbindlicher Prompt-Abschnitt
+  („Vorberechnete Werte … nicht nachrechnen“).
+* **Ergebnisdokument**: JSON-Schema je Kachel, Pydantic-Validierung, ein Reparaturversuch,
+  danach klarer Fehler statt Stillbruch.
+* **Export**: Excel mit **Formeln auf das Annahmen-Blatt**, CSV, JSON, Markdown,
+  SVG-Diagramme (Donut/Balken), Druck-HTML (A4) zum PDF-Speichern.
+* **Bild-Input**: Fotos/Scans werden als multimodale Nachricht an Vision-Modelle gegeben
+  (statt wie vorher verworfen).
+* **Eval-Harness**: Testfälle laufen automatisch und werden nach Vollständigkeit, markierten
+  Annahmen, **erfundenen Zahlen** und Format bewertet.
+* **Datenschutz-Schalter**: `SUSMOB_MODE=produktion` + `SUSMOB_ALLOW_FREE_FOR_DATA=0` sperrt
+  Gratis-Modelle für echte Daten.
 
 ## Quickstart
 
@@ -48,91 +64,103 @@ die den vollständigen Durchlauf zeigt – Rückfragen, Annahmen, Tabellen, Erge
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env                           # OPENROUTER_API_KEY eintragen
-.venv/bin/python -m uvicorn server.main:app --host 0.0.0.0 --port 8080
+.venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8080
 ```
 
-Die Datei `.env` im Projektordner wird beim Start automatisch geladen (eigener Mini-Loader in
-`server/envfile.py`, keine Zusatz-Abhängigkeit). Echte Umgebungsvariablen haben Vorrang:
+* App: `http://localhost:8080/`
+* Admin (Prompts, Modelle): `http://localhost:8080/#/admin`
+* Admin (Kosten, Health, Audit, Eval): `http://localhost:8080/#/admin/system`
+* Ohne `OPENROUTER_API_KEY` läuft die App im Demo-Modus: UI, Upload, Rechner, Export und
+  Beispiele funktionieren; Chat antwortet mit Hinweis.
+
+### Umgebungsvariablen (`.env`)
 
 ```bash
-OPENROUTER_API_KEY="sk-or-..."   # Pflicht für echte Chat-Antworten
-ADMIN_PASSWORD="geheim"          # optional: schützt den Admin-Bereich
+OPENROUTER_API_KEY="sk-or-..."          # Pflicht für echte Chat-Antworten
+ADMIN_PASSWORD="geheim"                 # optional: schützt den Admin-Bereich
+SUSMOB_MODE="demo"                      # demo | produktion
+SUSMOB_ALLOW_FREE_FOR_DATA="1"          # 0 = Gratis-Modelle für Daten sperren
 ```
 
-- App: `http://localhost:8080/`
-- Admin (System-Prompts): `http://localhost:8080/#/admin`
-- Ohne `OPENROUTER_API_KEY` läuft die App im Demo-Modus (UI/Upload/Standardwerte funktionieren, Chat antwortet mit Hinweis).
+### Tests
+
+```bash
+.venv/bin/python -m pytest tests/ -q     # 38 Tests: Rechner, Schemas, Export, Eval, API
+```
+
+## Deploy / Test-Homepage
+
+* **Docker**: `docker compose up -d app` (Volume `susmob-data` für DB/Uploads/Artefakte).
+* **Mit Domain + TLS**: `DOMAIN=test.example.de docker compose --profile tls up -d`
+  (Caddy holt Let's-Encrypt-Zertifikate, SSE wird nicht gepuffert).
+* **Ohne Serverpflege**: `render.yaml` im Repo (Render.com); für Fly.io ein Volume auf
+  `/app/data` mounten.
+* **Schnellster Test**: `cloudflared tunnel --url http://localhost:8080`.
+
+Details, Kosten und Stolperfallen: [`docs/TESTHOMEPAGE.md`](docs/TESTHOMEPAGE.md).
+
+## Beispiel-Unterhaltungen („Beispiele ansehen“)
+
+Jede Kachel bringt eine **fest gespeicherte Beispiel-Unterhaltung** mit (`server/examples.py`,
+`server/examples_extra.py`), die den vollständigen Durchlauf zeigt – Rückfragen, Annahmen,
+Tabellen, Ergebnis. Beispiele sind schreibgeschützt (`403`) und über
+`POST /api/conversations/{id}/duplicate` als eigene Unterhaltung übernehmbar.
+Neu erzeugen mit echtem Modell: Admin → Kachel → „🔁 Beispiel neu erzeugen“.
 
 ## Architektur
 
 ```
-index.html + static/      → schlanke SPA (vanilla JS, Hash-Router, SSE-Streaming, Mini-Markdown)
-server/main.py            → FastAPI: Tiles, Konversationen, Upload, Chat-Stream, Admin-API
-server/seed.py            → Kacheln, Fach-System-Prompts, Standardwerte, Testfälle (Seed), Migrationen
-server/examples.py        → Beispiel-Unterhaltungen je Kachel (schreibgeschützt, übernehmbar)
-server/envfile.py         → lädt .env (OPENROUTER_API_KEY, ADMIN_PASSWORD)
-server/llm.py             → OpenRouter-Client (streaming + Einmal-Call)
-server/files.py           → Text-Extraktion: txt/md/csv/json, xlsx, docx, pdf (gekürzt auf 12k Zeichen/Datei)
-server/db.py              → SQLite (WAL) in data/susmob.db
-data/uploads/             → hochgeladene Dateien (git-ignoriert)
+index.html + static/        → SPA (vanilla JS, Hash-Router, SSE, Mini-Markdown)
+server/main.py              → FastAPI: Tiles, Konversationen, Upload, Chat, Ergebnis/Export, Admin
+server/seed.py              → Kacheln, Prompts, Standardwerte, Testfälle, Migrationen
+server/examples*.py         → Beispiel-Unterhaltungen je Kachel (schreibgeschützt)
+server/llm.py               → OpenRouter-Client: Streaming, Fallback-Kette, Backoff, Usage
+server/health.py            → Modell-Endpunkt-Health-Check, Kette, Modellfähigkeiten
+server/telemetry.py         → llm_calls + audit_log + Kostenauswertung
+server/rechner.py           → deterministische Rechenkerne je Kachel
+server/schemas.py           → JSON-Schema + Pydantic-Validierung + Reparaturprompt
+server/export.py            → Excel (Formeln), CSV, JSON, Markdown, SVG, Druck-HTML, Artefakte
+server/eval.py              → Eval-Harness (Score, erfundene Zahlen, Vollständigkeit)
+server/files.py             → Textextraktion + Bild-Erkennung (multimodal)
+server/db.py                → SQLite (WAL) in data/susmob.db
+data/                       → DB, Uploads, Artefakte (git-ignoriert)
 ```
-
-### Wie ein Chat-Request zustandekommt
-
-`System-Prompt (Admin, pro Kachel)` + `## Konfiguration der Kommune` (Standardwerte: Nutzerwerte > Defaults)
-+ `## Hochgeladene Dateien` (extrahierter Text, gekürzt) + `## Gesprächsregeln` (Rückfragen, Annahmen kennzeichnen)
-+ Historie (letzte 30 Nachrichten) + aktuelle Nutzernachricht → OpenRouter (Streaming, SSE an Frontend).
-
-### Standardwerte
-
-- **Nutzer-setzbar** (Kommune, pro Kachel in der Kachelansicht unter „⚙️ Standardwerte"): fließen als „Konfiguration der Kommune" in jeden Prompt und haben Vorrang.
-- **Fachwerte im System-Prompt** (z. B. Besetzungsgrade, Emissionsfaktoren, Kraftstoffwerte): stehen als Fallback im Prompt, gelten nur wenn die Kommune nichts anderes angibt – und werden vom Bot als Annahme benannt.
-
-### Admin-Bereich (`#/admin`)
-
-- Modell & Temperature pro Kachel (Modell-Liste = gängige OpenRouter-Modelle, eigene IDs möglich)
-- System-Prompt-Editor mit **Versionshistorie** (jedes Speichern = neue Version, restaurierbar)
-- **Testlauf**: Testfall auswahlbbar/anlegbar (Nachricht + simulierter Dateikontext), läuft gegen den aktuellen Prompt
-- Schutz: `ADMIN_PASSWORD` als Env setzen → Login erforderlich (Token im localStorage)
 
 ## API (Auszug)
 
 ```
-GET  /api/tiles                          Kacheln (+Vorschläge)
-GET  /api/models[?refresh=1]             Modell-Liste (live von OpenRouter, Gratis-Modelle zuerst)
-GET  /api/models/status                  Diagnose: Key gesetzt? Live-Liste geladen?
-POST /api/conversations                  {tile_id}
-GET  /api/conversations?tile_id=...      eigene zuerst, is_example markiert Beispiele
-GET  /api/conversations/{id}             + messages + files
-POST /api/conversations/{id}/duplicate    Beispiel/eigene Unterhaltung als Kopie übernehmen
-DELETE /api/conversations/{id}            (Beispiele: 403)
-POST /api/conversations/{id}/files       multipart-Upload
-DELETE /api/conversations/{id}/files/{fid}
-POST /api/conversations/{id}/chat        SSE: event token | error | done
-GET  /api/tiles/{id}/standardwerte       inkl. aktueller Nutzerwerte
-PUT  /api/tiles/{id}/standardwerte       {values: {key: val}}
-POST /api/admin/login                    {password} (falls ADMIN_PASSWORD gesetzt)
-GET  /api/admin/tiles                    inkl. System-Prompts
-PUT  /api/admin/tiles/{id}               {model?, temperature?, system_prompt?}
-GET  /api/admin/tiles/{id}/versions
-POST /api/admin/tiles/{id}/versions/{vid}/restore
-GET/POST/DELETE /api/admin/tiles/{id}/test-cases
-POST /api/admin/tiles/{id}/test          {message, file_content} → Antwort
-GET  /api/admin/examples                 Status der Beispiele je Kachel
-POST /api/admin/examples/regenerate      [?tile_id=...] Beispiele mit echtem Modell neu erzeugen
+GET  /api/tiles                                  Kacheln (+hat_rechner, fallback_models)
+GET  /api/models[?refresh=1]                     Modell-Liste (live, Gratis zuerst)
+GET  /api/models/status                          Key? Live-Liste? Health-Zusammenfassung?
+GET  /api/rechner                                alle Rechenkerne + Felder
+GET  /api/tiles/{tid}/rechner                    Felder inkl. zuletzt gespeicherter Werte
+POST /api/tiles/{tid}/rechner                    {values} → rechnet, speichert, protokolliert
+GET  /api/tiles/{tid}/standardwerte              inkl. aktueller Nutzerwerte
+PUT  /api/tiles/{tid}/standardwerte              {values: {key: val}}
+POST /api/conversations/{id}/chat                SSE: token | retry | meta | error | done
+POST /api/conversations/{id}/ergebnis            Structured Output + Validierung + Artefakte
+GET  /api/conversations/{id}/ergebnis            gespeichertes Ergebnisdokument (+Markdown)
+POST /api/conversations/{id}/export?format=…     xlsx | csv | json | md | html (Druck/PDF)
+GET  /api/artifacts/{aid}/download|anzeige       Artefakt herunterladen / anzeigen
+GET  /api/admin/metrics?days=30                  Kosten, Tokens, Fehler, KPIs
+GET  /api/admin/health · POST /api/admin/health/check   Modell-Endpunkte prüfen
+GET  /api/admin/audit                            Audit-Log
+GET  /api/admin/eval · POST /api/admin/eval/run  Eval-Harness
+GET  /healthz                                    Betriebs-Check (Tiles, Key, letzter Call)
 ```
 
 ## Betrieb ohne Internetzugang (Sandbox/Vorschau)
 
 Der Chat braucht eine ausgehende Verbindung zu `openrouter.ai`. Ist sie gesperrt (z. B. in
-abgeschotteten Vorschau-Umgebungen), antwortet der Chat mit einem klaren Hinweis statt mit einem
-Modellergebnis – **Beispiele, Oberfläche, Upload, Standardwerte und Admin funktionieren trotzdem**
-vollständig, weil die Beispiele als statische Verläufe in der Datenbank liegen.
+abgeschotteten Vorschau-Umgebungen), antwortet der Chat mit klarer Meldung – **Beispiele,
+Oberfläche, Upload, Rechner, Ergebnis/Export und Admin funktionieren trotzdem** vollständig.
+Im Admin → „📈 Kosten, Health & Eval“ zeigt der Health-Check die Netzsperre an.
 
 ## Roadmap / Ideen
 
-- [ ] Multi-Tenancy / Benutzerauth (Profil je Kommune, getrennte Daten)
-- [ ] Ergebnis-Export (PDF/DOCX) für Beschlussvorlagen
-- [ ] Embeddings-/Vektorsuche für große Datendokumente statt Bruchkürzung
-- [ ] Diagramme (Bilanz-Donut, Takt-Tafel) client-seitig aus strukturierten Antworten
-- [ ] Audit-Log aller LLM-Calls (Modell, Tokens, Kosten)
+* [ ] Multi-Tenancy / Benutzerauth (Kommune = Mandant, Rollen, Datenisolation) – Phase 4
+* [ ] PDF mit Briefkopf-Vorlage (WeasyPrint) für Beschlussvorlagen
+* [ ] Förderdatenbank + Fristenkalender (Kachel 9)
+* [ ] Weitere Kacheln: Modal-Split-Monitoring, Verkehrsversuch, On-Demand, City-Logistik
+* [ ] Embeddings-/Vektorsuche für große Datendokumente
+* [ ] Kostenoptimierung: Prompt-Kürzung mit Eval-Nachweis, Modell-Routing, Caching bei Paid

@@ -1,0 +1,38 @@
+# SusMob – Start in zwei Varianten:
+#  1) Nur App (Port 8080, für Test/Tunnel):   docker compose up -d app
+#  2) App + Caddy mit automatischem HTTPS:    DOMAIN=test.example.de docker compose up -d
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "8080"
+      SUSMOB_MODE: "${SUSMOB_MODE:-demo}"
+      SUSMOB_ALLOW_FREE_FOR_DATA: "${SUSMOB_ALLOW_FREE_FOR_DATA:-1}"
+    volumes:
+      - susmob-data:/app/data
+    expose:
+      - "8080"
+    ports:
+      - "${APP_BIND:-127.0.0.1:8080}:8080"   # direkt erreichbar (nur lokal gebunden)
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      DOMAIN: "${DOMAIN:-localhost}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    profiles: ["tls"]   # nur mit --profile tls bzw. "docker compose --profile tls up -d"
+
+volumes:
+  susmob-data:
+  caddy-data:
+  caddy-config:

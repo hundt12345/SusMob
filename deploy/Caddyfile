@@ -1,0 +1,25 @@
+# Automatisches TLS (Let's Encrypt) für die Test-Homepage.
+# DOMAIN aus der Umgebung (docker-compose) – Caddy holt das Zertifikat selbst.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# SSE-Streaming des Chats darf nicht gepuffert werden
+	reverse_proxy app:8080 {
+		flush_interval -1
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

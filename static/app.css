@@ -60,14 +60,19 @@ button { font: inherit; cursor: pointer; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; }
 .tile {
   background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-  padding: 1.1rem 1.2rem; display: flex; flex-direction: column; gap: 0.5rem;
-  transition: 0.15s; color: var(--text);
+  transition: 0.15s; color: var(--text); display: flex; flex-direction: column; overflow: hidden;
 }
 .tile:hover { border-color: var(--accent2); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
+.tilemain { padding: 1.1rem 1.2rem 0.7rem; display: flex; flex-direction: column; gap: 0.5rem; color: var(--text); flex: 1; }
 .tile .emoji { font-size: 1.9rem; }
 .tile h3 { font-size: 1.05rem; }
 .tile p { color: var(--muted); font-size: 0.85rem; line-height: 1.45; flex: 1; }
 .tile .go { font-size: 0.82rem; color: var(--accent); }
+.tileexample {
+  font-size: 0.8rem; padding: 0.55rem 1.2rem; border-top: 1px dashed var(--border);
+  background: rgba(56,189,248,0.05); color: var(--accent);
+}
+.tileexample:hover { background: rgba(56,189,248,0.12); }
 
 /* Tile-Ansicht */
 .tilehead { display: flex; align-items: flex-start; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
@@ -90,6 +95,22 @@ button { font: inherit; cursor: pointer; }
 .convitem .del { color: var(--muted); font-size: 0.8rem; opacity: 0; }
 .convitem:hover .del { opacity: 1; }
 .convitem .del:hover { color: var(--err); }
+.convitem.example { border: 1px dashed var(--border); margin-bottom: 0.2rem; }
+.convitem.example .t { color: var(--accent); }
+.convs-sub { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); padding: 0.55rem 0.5rem 0.2rem; border-top: 1px solid var(--border); margin-top: 0.35rem; }
+.convs-sub:first-child { border-top: none; margin-top: 0; }
+.convs-empty { color: var(--muted); font-size: 0.78rem; padding: 0.35rem 0.5rem 0.2rem; line-height: 1.45; }
+
+/* Beispiel-Banner im Chat */
+.examplebar {
+  display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap;
+  background: rgba(56,189,248,0.08); border-bottom: 1px solid var(--border);
+  padding: 0.6rem 1rem; border-radius: 14px 14px 0 0; font-size: 0.83rem;
+}
+.examplebar .txt { color: var(--muted); flex: 1; min-width: 200px; }
+.examplebar .btn { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+.badge { background: var(--accent2); color: #fff; border-radius: 99px; padding: 0.15rem 0.6rem; font-size: 0.72rem; font-weight: 600; }
+.btn.tiny { padding: 0.1rem 0.45rem; font-size: 0.7rem; margin-left: 0.4rem; vertical-align: middle; }
 
 /* Chat */
 .chat { background: var(--card); border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; min-height: 55vh; }

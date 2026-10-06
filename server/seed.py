@@ -13,26 +13,65 @@ from server import db
 TILES = [
     ("co2-bilanz", "🌍", "CO₂-Bilanz",
      "Emissionsbilanz des Verkehrs aus Fahr-, ÖPNV- und Fuhrparksdaten – mit Annahmen, Tabellen und Einsparpotenzialen.",
-     "anthropic/claude-sonnet-4", 0.2, 1),
+     "nvidia/nemotron-3-ultra-550b-a55b:free", 0.2, 1),
     ("beschlussvorlagen", "📄", "Beschlussvorlagen & Förderanträge",
      "Formgerechte Vorlagen für politische Gremien und passende Förderprogramme (Klimafonds/KIP, NAPE & Co.).",
-     "anthropic/claude-sonnet-4", 0.2, 2),
+     "qwen/qwen3.8-27b:free", 0.2, 2),
     ("klimaschutzkonzept", "🎯", "Klimaschutzkonzept",
      "Aufbau und Inhalte eines kommunalen Klimaschutzkonzepts: Ist-Bilanz, Zielbild, Sektoren, Monitoring.",
-     "anthropic/claude-sonnet-4", 0.2, 3),
+     "nvidia/nemotron-3-super-120b-a12b:free", 0.2, 3),
     ("massnahmenplanung", "🧭", "Maßnahmenplanung Mobilität",
      "Priorisierter Maßnahmenkatalog für nachhaltige Mobilität mit Kosten, Wirkung, KPIs und Phasenplanung.",
-     "anthropic/claude-sonnet-4", 0.2, 4),
+     "thinkingmachines/inkling:free", 0.2, 4),
     ("wegeplanung", "🚲", "Wegeplanung Fahrrad",
      "Konkrete Radtrassen zwischen Orten: Trennungsformen, Standards (FAVR/DVFS), Kosten und Bauabfolge.",
-     "anthropic/claude-sonnet-4", 0.2, 5),
+     "google/gemma-4-31b-it:free", 0.2, 5),
     ("argumentation", "🗣️", "Argumentationshilfe intern",
      "Faktenbasierte Argumente und Entkräftung typischer Gegenargumente für interne Gremien – mit Quellen.",
-     "google/gemini-2.5-flash", 0.3, 6),
+     "nvidia/nemotron-3.5-lightning:free", 0.3, 6),
     ("opnv-planung", "🚌", "ÖPNV-Planung",
      "Takt, Frequenzen und Streckenkonzepte für Bus und Schiene nach Versorgungsgrad und Fahrgastaufkommen.",
-     "anthropic/claude-sonnet-4", 0.2, 7),
+     "apodex/apodex-1.1-mini:free", 0.2, 7),
 ]
+
+# Gratis-Modelle (OpenRouter, Stand 10/2026 – Liste im Admin-Bereich live abrufbar).
+# Free-Tier-Limits: ca. 20 Requests/Minute und 50/Tag (1.000/Tag ab 10 $ Guthaben).
+FREE_MODELS = [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "qwen/qwen3.8-27b:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "thinkingmachines/inkling:free",
+    "apodex/apodex-1.1-mini:free",
+    "openai/gpt-oss-120b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+]
+
+# Modelle, die in früheren Versionen als Default gesetzt waren und beim Start
+# automatisch auf das jeweilige Gratis-Modell umgestellt werden (nur wenn die
+# Kachel noch auf dem alten Default steht – eigene Admin-Wahl bleibt erhalten).
+ALTE_DEFAULT_MODELLE = {
+    "anthropic/claude-sonnet-4",
+    "anthropic/claude-opus-4",
+    "anthropic/claude-3.5-haiku",
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-pro",
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+}
+
+# Sachliche Korrekturen an ausgelieferten Prompts. Wird nur angewandt, wenn der
+# Prompt noch exakt den alten Wortlaut enthält (also nicht selbst bearbeitet wurde).
+PROMPT_FIXES = [
+    (
+        "co2-bilanz",
+        "- Dieselbus Stadt: ca. 4,5 l/100 km pro Fahrzeug; pro Fahrgast ca. 3 g CO₂/km bei Ø 45 Fahrgästen",
+        "- Dieselbus Stadt: ca. 35–50 l/100 km pro Fahrzeug (typ. 45); je Fahrgast ca. 25–35 g CO₂/km bei Ø 40 Fahrgästen",
+    ),
+]
+
 
 PROMPTS = {
 "co2-bilanz": """Du bist eine erfahrene Expertin für kommunale Emissionsbilanzen im Verkehrssektor mit Methodenwissen nach UBA/BBU und Praxis aus städtischen Klimabüros. Du unterstützt eine deutsche Kommune bei der Erstellung oder Aktualisierung ihrer CO₂-Bilanz für den Verkehr.
@@ -47,8 +86,8 @@ FACHWERTE ALS FALLBACK (verwende NUR, wenn die Kommune nichts anderes angibt; be
 - Kraftstoff: Diesel 2,68 kg CO₂/L; Benzin 2,38 kg CO₂/L
 - Pkw-Diesel-Flotte: Ø 193 g CO₂/km pro Fahrzeug (DE-Flottenmittelwert); Besetzungsgrad Pkw: 1,1 Personen
 - Pkw-Benzin: Ø 140 g CO₂/km pro Fahrzeug; Hybrid: Ø 115 g CO₂/km
-- Elektro: 18 kWh/100 km (Pkw), 1,2 kWh/km (Bus); Strommix-Faktor DE: 372 g CO₂/kWh
-- Dieselbus Stadt: ca. 4,5 l/100 km pro Fahrzeug; pro Fahrgast ca. 3 g CO₂/km bei Ø 45 Fahrgästen
+- Elektro: 18 kWh/100 km (Pkw), 1,2–1,4 kWh/km (Bus); Strommix-Faktor DE: 372 g CO₂/kWh
+- Dieselbus Stadt: ca. 35–50 l/100 km pro Fahrzeug (typ. 45); je Fahrgast ca. 25–35 g CO₂/km bei Ø 40 Fahrgästen
 - Schienen-ÖPNV: ca. 35 g CO₂/km pro Fahrgast; Straßenbahn: ca. 30 g CO₂/km pro Fahrgast
 - Fahrrad/Fußweg: 0 g CO₂ (direkt)
 
@@ -285,7 +324,7 @@ SUGGESTIONS = {
 TESTFAELLE = {
 "co2-bilanz": [
     ("Beispiel: Fuhrpark-Bilanz 2024",
-     "Erstelle die Bilanz für unseren Fuhrpark 2024: 25 Diesel-Pkw (Ø 28.000 km/Jahr), 4 E-Pkw (Ø 22.000 km/Jahr, 18 kWh/100 km), 3 Diesel-Busse (Ø 85.000 km/Jahr, Kraftstoff 4,6 l/100 km, Belegung Ø 38 Fahrgäste). Strommix 372 g/kWh.",
+     "Erstelle die Bilanz für unseren Fuhrpark 2024: 25 Diesel-Pkw (Ø 28.000 km/Jahr), 4 E-Pkw (Ø 22.000 km/Jahr, 18 kWh/100 km), 3 Diesel-Busse (Ø 85.000 km/Jahr, Kraftstoff 45 l/100 km, Belegung Ø 38 Fahrgäste). Strommix 372 g/kWh.",
      "fahrzeug,art,km_jahr\n1-25,Pkw Diesel,28000\n26-29,Pkw E,22000\n30-32,Bus Diesel,85000"),
 ],
 "beschlussvorlagen": [
@@ -328,10 +367,41 @@ def _now() -> str:
 
 
 def seed_all() -> None:
-    """Idempotentes Seed: nur anlegen, wenn noch keine Kacheln existieren."""
+    """Idempotentes Seed + Migration bestehender Datenbanken."""
     existing = db.query1("SELECT COUNT(*) AS n FROM tiles")["n"]
-    if existing:
-        return
+    if not existing:
+        _insert_all()
+    _migrate()
+
+
+def _tile_model(tid: str) -> str:
+    return next(t[4] for t in TILES if t[0] == tid)
+
+
+def _migrate() -> None:
+    """Alte (kostenpflichtige) Default-Modelle auf Gratis-Modelle umstellen
+    und sachliche Prompt-Korrekturen anwenden – nur wenn unverändert."""
+    for tid, model in [(t[0], t[4]) for t in TILES]:
+        row = db.query1("SELECT model FROM tiles WHERE id=?", (tid,))
+        if row and row["model"] in ALTE_DEFAULT_MODELLE:
+            db.exec("UPDATE tiles SET model=? WHERE id=?", (model, tid))
+
+    for tid, old, new in PROMPT_FIXES:
+        row = db.query1("SELECT system_prompt FROM prompts WHERE tile_id=?", (tid,))
+        if not row or old not in row["system_prompt"]:
+            continue
+        ts = _now()
+        db.exec(
+            "INSERT INTO prompt_versions (tile_id, system_prompt, model, created_at) VALUES (?,?,?,?)",
+            (tid, row["system_prompt"], _tile_model(tid), ts),
+        )
+        db.exec(
+            "UPDATE prompts SET system_prompt=?, updated_at=? WHERE tile_id=?",
+            (row["system_prompt"].replace(old, new), ts, tid),
+        )
+
+
+def _insert_all() -> None:
     ts = _now()
     with db.get() as conn:
         for tid, emoji, name, short, model, temp, sort in TILES:

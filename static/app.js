@@ -120,7 +120,7 @@ function route() {
   const h = location.hash || "#/";
   let m;
   if (h === "#/" || h === "#") return viewHome();
-  if ((m = h.match(/^#\/tile\/([\w-]+)/))) return viewTile(m[1]);
+  if ((m = h.match(/^#\/tile\/([\w-]+)(?:\/([\w-]+))?/))) return viewTile(m[1], m[2]);
   if (h === "#/admin") return viewAdmin();
   viewHome();
 }
@@ -138,18 +138,22 @@ async function viewHome() {
     return;
   }
   $("#tiles").innerHTML = state.tiles.map(t => `
-    <a class="tile" href="#/tile/${t.id}">
-      <div class="emoji">${t.emoji}</div>
-      <h3>${esc(t.name)}</h3>
-      <p>${esc(t.short)}</p>
-      <span class="go">Starten →</span>
-    </a>`).join("");
+    <div class="tile">
+      <a class="tilemain" href="#/tile/${t.id}">
+        <div class="emoji">${t.emoji}</div>
+        <h3>${esc(t.name)}</h3>
+        <p>${esc(t.short)}</p>
+        <span class="go">Starten →</span>
+      </a>
+      <a class="tileexample" href="#/tile/${t.id}/beispiel" title="Gespeicherten Beispiellauf dieser Kachel ansehen">📘 Beispiel ansehen</a>
+    </div>`).join("");
 }
 
 /* ---------- Tile-Ansicht ---------- */
-async function viewTile(tid) {
+async function viewTile(tid, sub) {
   navActive("home");
   state.tile = null; state.conv = null;
+  state.wantExample = sub === "beispiel";
   view.innerHTML = `<div class="tilehead"><span style="color:var(--muted)">Lädt …</span></div>`;
   let tile;
   try { tile = (await api("/api/tiles")).find(t => t.id === tid); } catch (e) { return errView(e); }
@@ -174,9 +178,10 @@ async function viewTile(tid) {
         <div id="convList"></div>
       </aside>
       <section class="chat">
+        <div class="examplebar hidden" id="exampleBar"></div>
         <div id="msgArea"></div>
         <div class="filechips" id="fileChips"></div>
-        <div class="composer">
+        <div class="composer" id="composerBox">
           <label class="attach" title="Datei anhängen (txt, csv, xlsx, docx, pdf …)">📎
             <input type="file" id="fileInput" multiple>
           </label>
@@ -199,7 +204,9 @@ async function viewTile(tid) {
   });
   $("#fileInput").addEventListener("change", onFiles);
 
-  if (state.convs.length) openConv(state.convs[0].id);
+  const example = state.convs.find(c => c.is_example);
+  if (state.wantExample && example) openConv(example.id);
+  else if (state.convs.length) openConv(state.convs[0].id);
   else renderEmptyChat();
 }
 
@@ -211,13 +218,27 @@ async function loadConvs(tid) {
   state.convs = await api("/api/conversations?tile_id=" + encodeURIComponent(tid));
   const list = $("#convList");
   if (!list) return;
-  list.innerHTML = state.convs.length
-    ? state.convs.map(c => `
-      <div class="convitem ${state.conv && state.conv.id === c.id ? "active" : ""}" data-cid="${c.id}">
-        <span class="t" title="${esc(c.title)}">${esc(c.title)}</span>
+  const mine = state.convs.filter(c => !c.is_example);
+  const examples = state.convs.filter(c => c.is_example);
+  const cls = c => `convitem ${c.is_example ? "example" : ""} ${state.conv && state.conv.id === c.id ? "active" : ""}`;
+  const label = c => esc(String(c.title).replace(/^📘\s*/, ""));
+  let html = "";
+  if (examples.length) {
+    html += `<div class="convs-sub">📘 Beispiele (schreibgeschützt)</div>`;
+    html += examples.map(c => `
+      <div class="${cls(c)}" data-cid="${c.id}" title="Beispiellauf ansehen">
+        <span class="t">${label(c)}</span>
+      </div>`).join("");
+  }
+  html += `<div class="convs-sub">Eigene Unterhaltungen</div>`;
+  html += mine.length
+    ? mine.map(c => `
+      <div class="${cls(c)}" data-cid="${c.id}">
+        <span class="t" title="${esc(c.title)}">${label(c)}</span>
         <span class="del" title="Löschen" data-del="${c.id}">✕</span>
       </div>`).join("")
-    : `<div style="color:var(--muted);font-size:0.8rem;padding:0.4rem 0.5rem">Noch keine Unterhaltungen.</div>`;
+    : `<div class="convs-empty">Noch keine eigene Unterhaltung – „+ Neue Unterhaltung“ oder ein Beispiel übernehmen.</div>`;
+  list.innerHTML = html;
   $$(".convitem", list).forEach(el => {
     el.onclick = () => openConv(el.dataset.cid);
   });
@@ -236,9 +257,11 @@ async function loadConvs(tid) {
 function renderEmptyChat() {
   const area = $("#msgArea");
   const s = state.tile.suggestions || [];
+  const ex = (state.convs || []).find(c => c.is_example);
   area.innerHTML = `<div class="empty">
     <div class="big">${state.tile.emoji}</div>
     <p><strong>${esc(state.tile.name)}</strong> – Daten hochladen (📎) oder direkt loslegen.</p>
+    ${ex ? `<p class="hint">Noch unsicher? <a href="#/tile/${state.tile.id}/beispiel">📘 Beispiel dieser Kachel ansehen</a></p>` : ""}
     ${s.length ? `<div class="sugg">${s.map(x => `<button data-sugg="${esc(x)}">${esc(x.slice(0, 64))}${x.length > 64 ? "…" : ""}</button>`).join("")}</div>` : ""}
   </div>`;
   $$("#msgArea .sugg button").forEach(b => {
@@ -252,6 +275,31 @@ async function openConv(cid) {
   $$("#convList .convitem").forEach(el => el.classList.toggle("active", el.dataset.cid === cid));
   renderMessages();
   renderFiles();
+  renderExampleBar();
+}
+
+/* Beispiel-Unterhaltung: Banner zeigen, Eingabe sperren */
+function renderExampleBar() {
+  const bar = $("#exampleBar");
+  if (!bar) return;
+  const isEx = !!(state.conv && state.conv.is_example);
+  bar.classList.toggle("hidden", !isEx);
+  $("#composerBox") && $("#composerBox").classList.toggle("hidden", isEx);
+  $("#fileChips") && $("#fileChips").classList.toggle("hidden", isEx);
+  if (!isEx) return;
+  bar.innerHTML = `
+    <span class="badge">📘 Beispiel</span>
+    <span class="txt">Gespeicherter Beispiellauf – schreibgeschützt. So sieht ein vollständiger Durchlauf dieser Kachel aus.</span>
+    <button class="btn primary" id="takeExample">Als eigene Unterhaltung übernehmen</button>`;
+  $("#takeExample").onclick = async () => {
+    try {
+      const r = await api(`/api/conversations/${state.conv.id}/duplicate`, { method: "POST" });
+      await loadConvs(state.tile.id);
+      await openConv(r.id);
+      toast("Übernommen – jetzt kannst du weiterarbeiten ✓");
+      $("#msgInput") && $("#msgInput").focus();
+    } catch (e) { toast("Fehler: " + e.message); }
+  };
 }
 
 function renderMessages() {
@@ -477,10 +525,10 @@ async function renderAdminMain() {
     <div class="card">
       <h3>Modell & Parameter <span style="color:var(--muted);font-weight:400;font-size:0.8rem">${t.emoji} ${esc(t.name)}</span></h3>
       <div class="row">
-        <label class="f"><span>Modell (OpenRouter)</span>
+        <label class="f"><span>Modell (OpenRouter) <button class="btn tiny" id="reloadModels" type="button" title="Liste live von OpenRouter neu laden">🔄 gratis/aktuell</button></span>
           <select id="modelSel">
-            ${models.map(m => `<option value="${m}" ${m === t.model ? "selected" : ""}>${m}</option>`).join("")}
-            ${models.includes(t.model) ? "" : `<option value="${esc(t.model)}" selected>${esc(t.model)} (eigener)</option>`}
+            ${models.map(m => `<option value="${esc(m.id)}" ${m.id === t.model ? "selected" : ""}>${esc(m.label)}</option>`).join("")}
+            ${models.some(m => m.id === t.model) ? "" : `<option value="${esc(t.model)}" selected>${esc(t.model)} (eigener)</option>`}
           </select>
         </label>
         <label class="f" style="max-width:260px"><span>Temperature: <b id="tempVal">${t.temperature}</b></span>
@@ -525,6 +573,14 @@ async function renderAdminMain() {
           <div class="result" id="testResult"></div>
         </div>
       </div>
+    </div>
+    <div class="card">
+      <h3>📘 Beispiel-Unterhaltung dieser Kachel</h3>
+      <p class="hint">Erzeugt die Beispielantworten mit dem aktuell konfigurierten Modell
+        (<b>${esc(t.model)}</b>) neu – verbraucht so viele OpenRouter-Requests, wie das Beispiel
+        Assistenten-Antworten enthält. Beim Free-Tier das Tageslimit (ca. 50 Requests) beachten.</p>
+      <button class="btn" id="regenExample">🔁 Beispiel neu erzeugen</button>
+      <div class="result" id="exampleResult"></div>
     </div>`;
 
   const firstTc = state.testCases[0];
@@ -543,6 +599,30 @@ async function renderAdminMain() {
   });
 
   $("#tempRange").oninput = e => { $("#tempVal").textContent = e.target.value; };
+  $("#reloadModels").onclick = async () => {
+    try {
+      const fresh = await api("/api/models?refresh=1");
+      toast(`Modell-Liste aktualisiert: ${fresh.filter(m => m.free).length} gratis von ${fresh.length}`);
+      renderAdminMain();
+    } catch (e) { toast("Fehler: " + e.message); }
+  };
+  $("#regenExample").onclick = async () => {
+    if (!confirm("Beispiel dieser Kachel mit dem aktuellen Modell neu erzeugen? Das verbraucht OpenRouter-Requests (Free-Tier-Limit beachten).")) return;
+    const btn = $("#regenExample");
+    btn.disabled = true; btn.textContent = "⏳ läuft …";
+    $("#exampleResult").innerHTML = "";
+    try {
+      const r = await api(`/api/admin/examples/regenerate?tile_id=${encodeURIComponent(t.id)}`, { method: "POST" });
+      const res = (r.results || [])[0] || {};
+      $("#exampleResult").innerHTML = res.ok
+        ? `<div class="meta">✅ Neu erzeugt mit <b>${esc(res.model)}</b> · ${res.chars} Zeichen</div>`
+        : `<div class="errbox">⚠️ ${esc(res.error || "Unbekannter Fehler")}</div>`;
+    } catch (e) {
+      $("#exampleResult").innerHTML = `<div class="errbox">⚠️ ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = "🔁 Beispiel neu erzeugen";
+    }
+  };
   $("#saveMeta").onclick = async () => {
     await api("/api/admin/tiles/" + t.id, {
       method: "PUT", headers: { "Content-Type": "application/json" },

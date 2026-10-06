@@ -57,7 +57,8 @@ def init(path: Path) -> None:
                 tile_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                is_example INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +88,17 @@ def init(path: Path) -> None:
             );
             """
         )
+        _migrate(conn)
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Ergänzt Spalten, die in älteren Datenbanken noch fehlen."""
+    if "is_example" not in _columns(conn, "conversations"):
+        conn.execute("ALTER TABLE conversations ADD COLUMN is_example INTEGER NOT NULL DEFAULT 0")
 
 
 @contextmanager

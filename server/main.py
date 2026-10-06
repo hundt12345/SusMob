@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,11 +21,15 @@ from pydantic import BaseModel
 from typing import Optional
 
 from server import db
+from server.envfile import load as load_env
+from server.examples import EXAMPLES, replace_messages, seed_examples
 from server.files import extract_text, SUPPORTED
 from server.llm import chat_once, stream_chat
-from server.seed import seed_all
+from server.seed import FREE_MODELS, seed_all
 
 ROOT = Path(__file__).resolve().parent.parent
+load_env(ROOT / ".env")  # OPENROUTER_API_KEY / ADMIN_PASSWORD aus .env
+
 DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,6 +40,7 @@ HISTORY_LIMIT = 30  # Nachrichten im LLM-Kontext
 
 db.init(DATA_DIR / "susmob.db")
 seed_all()
+seed_examples(UPLOAD_DIR)
 
 app = FastAPI(title="SusMob API")
 
@@ -84,6 +90,22 @@ def _check_admin(request: Request) -> None:
     tok = request.headers.get("X-Admin-Token", "")
     if not tok or tok not in _admin_tokens:
         raise HTTPException(401, "Admin-Zugang fehlt")
+
+
+def _llm_error_text(err: Exception) -> str:
+    """Verständliche Fehlermeldung – unterscheidet Netz-/Verbindungsproblem von Modellfehler."""
+    text = str(err)
+    net = any(k in text for k in ("SSL", "EOF", "Connect", "Timeout", "timed out", "getaddrinfo", "Name or service"))
+    if net:
+        return (
+            "**OpenRouter ist von diesem Server aus nicht erreichbar.**\n\n"
+            f"Technische Ursache: {text}\n\n"
+            "Wenn du diese Vorschau in einer abgeschotteten Sandbox ansiehst: dort ist der ausgehende "
+            "Zugriff auf `openrouter.ai` gesperrt – auf einem eigenen Server oder lokal mit Internetzugang "
+            "antwortet das Modell normal. Prüfen lässt sich das unter `#/admin` → Modellliste aktualisieren "
+            "oder über `/api/models/status`."
+        )
+    return f"OpenRouter-Fehler: {text}"
 
 
 def _config_lines(tid: str) -> list[str]:
@@ -190,9 +212,61 @@ def list_tiles():
     ]
 
 
+_MODEL_CACHE: dict = {"ts": 0.0, "items": []}
+MODEL_CACHE_SECONDS = 900
+
+
+async def _fetch_models() -> list[dict]:
+    """Live-Liste von OpenRouter (öffentlich, ohne Key) – Gratis-Modelle zuerst."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            r = await client.get("https://openrouter.ai/api/v1/models")
+            r.raise_for_status()
+            data = r.json().get("data", [])
+    except Exception:  # noqa: BLE001 – offline/Netzsperre → statische Liste
+        return []
+    free, paid = [], []
+    for m in data:
+        mid = m.get("id", "")
+        arch = m.get("architecture", {}) or {}
+        if "text" not in (arch.get("output_modalities") or ["text"]):
+            continue
+        p = m.get("pricing") or {}
+        gratis = (
+            float(p.get("prompt") or 0) == 0 and float(p.get("completion") or 0) == 0
+        )
+        if mid in FREE_MODELS or mid.endswith(":free") or gratis:
+            free.append({"id": mid, "free": True, "label": f"🆓 {mid}"})
+        elif mid in MODELS:
+            paid.append({"id": mid, "free": False, "label": mid})
+    free.sort(key=lambda m: (m["id"] not in FREE_MODELS, m["id"]))  # kuratierte zuerst
+    return free + paid
+
+
 @app.get("/api/models")
-def list_models():
-    return MODELS
+async def list_models(refresh: int = 0):
+    """Modell-Liste für den Admin-Bereich: live von OpenRouter, sonst Fallback."""
+    now = time.time()
+    if refresh or not _MODEL_CACHE["items"] or now - _MODEL_CACHE["ts"] > MODEL_CACHE_SECONDS:
+        items = await _fetch_models()
+        if items:
+            _MODEL_CACHE.update(ts=now, items=items)
+    if _MODEL_CACHE["items"]:
+        return _MODEL_CACHE["items"]
+    return [{"id": m, "free": m.endswith(":free"), "label": f"🆓 {m}" if m.endswith(":free") else m} for m in (FREE_MODELS + MODELS)]
+
+
+@app.get("/api/models/status")
+def models_status():
+    """Diagnose: Ist OpenRouter erreichbar und ist ein Key gesetzt?"""
+    return {
+        "api_key": bool(os.environ.get("OPENROUTER_API_KEY", "")),
+        "live_liste": bool(_MODEL_CACHE["items"]),
+        "anzahl": len(_MODEL_CACHE["items"]),
+        "geprueft_am": datetime.fromtimestamp(_MODEL_CACHE["ts"], timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if _MODEL_CACHE["ts"] else "",
+    }
 
 
 @app.get("/api/tiles/{tid}/standardwerte")
@@ -235,9 +309,19 @@ def new_conversation(body: ConvIn):
 
 @app.get("/api/conversations")
 def list_conversations(tile_id: str | None = None):
+    """Eigene Unterhaltungen zuerst, Beispiele ans Ende der Liste."""
     if tile_id:
-        return [dict(r) for r in db.query("SELECT * FROM conversations WHERE tile_id=? ORDER BY updated_at DESC", (tile_id,))]
-    return [dict(r) for r in db.query("SELECT * FROM conversations ORDER BY updated_at DESC LIMIT 200")]
+        return [
+            dict(r)
+            for r in db.query(
+                "SELECT * FROM conversations WHERE tile_id=? ORDER BY is_example, updated_at DESC",
+                (tile_id,),
+            )
+        ]
+    return [
+        dict(r)
+        for r in db.query("SELECT * FROM conversations ORDER BY is_example, updated_at DESC LIMIT 200")
+    ]
 
 
 @app.get("/api/conversations/{cid}")
@@ -253,9 +337,48 @@ def get_conversation(cid: str):
     return conv
 
 
+@app.post("/api/conversations/{cid}/duplicate")
+def duplicate_conversation(cid: str):
+    """Übernimmt ein (Beispiel-)Gespräch als eigene, bearbeitbare Unterhaltung."""
+    src = _conv_or_404(cid)
+    new_id = uuid.uuid4().hex
+    ts = _now()
+    base_title = src["title"].replace("📘 Beispiel:", "").strip() or "Unterhaltung"
+    db.exec(
+        "INSERT INTO conversations (id, tile_id, title, created_at, updated_at, is_example) VALUES (?,?,?,?,?,0)",
+        (new_id, src["tile_id"], f"{base_title} (eigene Kopie)", ts, ts),
+    )
+    for m in db.query(
+        "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id", (cid,)
+    ):
+        db.exec(
+            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?,?,?,?)",
+            (new_id, m["role"], m["content"], ts),
+        )
+    dest_dir = UPLOAD_DIR / new_id
+    for f in db.query("SELECT * FROM files WHERE conversation_id=? ORDER BY created_at", (cid,)):
+        fid = uuid.uuid4().hex
+        src_path = Path(f["stored_path"])
+        stored_path = ""
+        if src_path.exists():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            stored = dest_dir / f"{fid}_{f['filename']}"
+            shutil.copyfile(src_path, stored)
+            stored_path = str(stored)
+        db.exec(
+            "INSERT INTO files (id, conversation_id, tile_id, filename, size, stored_path, "
+            "extracted_chars, extracted_text, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (fid, new_id, src["tile_id"], f["filename"], f["size"], stored_path,
+             f["extracted_chars"], f["extracted_text"], ts),
+        )
+    return {"id": new_id}
+
+
 @app.delete("/api/conversations/{cid}")
 def delete_conversation(cid: str):
-    _conv_or_404(cid)
+    conv = _conv_or_404(cid)
+    if conv.get("is_example"):
+        raise HTTPException(403, "Beispiel-Unterhaltungen sind schreibgeschützt")
     for r in db.query("SELECT stored_path FROM files WHERE conversation_id=?", (cid,)):
         p = Path(r["stored_path"])
         if p.exists():
@@ -308,6 +431,12 @@ def delete_file(cid: str, fid: str):
 @app.post("/api/conversations/{cid}/chat")
 async def chat(cid: str, body: ChatIn):
     conv = _conv_or_404(cid)
+    if conv.get("is_example"):
+        raise HTTPException(
+            403,
+            "Das ist eine Beispiel-Unterhaltung (schreibgeschützt). Bitte über „Als eigene "
+            "Unterhaltung übernehmen“ weiterarbeiten.",
+        )
     tile = _tile_or_404(conv["tile_id"])
     prompt_row = db.query1("SELECT system_prompt FROM prompts WHERE tile_id=?", (tile["id"],))
     prompt = prompt_row["system_prompt"] if prompt_row else "Du bist ein hilfsbereiter Experte."
@@ -368,7 +497,7 @@ async def chat(cid: str, body: ChatIn):
                     "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?,?,?,?)",
                     (cid, "assistant", "".join(full), _now()),
                 )
-            yield _sse("error", {"error": f"OpenRouter-Fehler: {e}"})
+            yield _sse("error", {"error": _llm_error_text(e)})
             return
         db.exec(
             "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?,?,?,?)",
@@ -512,7 +641,79 @@ async def admin_test_run(request: Request, tid: str, body: TestIn):
         content = await chat_once(tile["model"], messages, api_key, tile["temperature"])
         return {"ok": True, "content": content, "model": tile["model"]}
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"OpenRouter-Fehler: {e}") from e
+        raise HTTPException(502, _llm_error_text(e)) from e
+
+
+@app.get("/api/admin/examples")
+def admin_examples(request: Request):
+    """Status der Beispiel-Unterhaltungen je Kachel."""
+    _check_admin(request)
+    out = []
+    for tid, ex in EXAMPLES.items():
+        cid = f"ex-{tid}"
+        n = db.query1("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (cid,))
+        tile = db.query1("SELECT emoji, name, model FROM tiles WHERE id=?", (tid,))
+        out.append({
+            "tile_id": tid,
+            "conversation_id": cid,
+            "title": ex["title"],
+            "note": ex["note"],
+            "messages": n["n"] if n else 0,
+            "model": tile["model"] if tile else "",
+            "name": f"{tile['emoji']} {tile['name']}" if tile else tid,
+        })
+    return out
+
+
+@app.post("/api/admin/examples/regenerate")
+async def admin_examples_regenerate(request: Request, tile_id: str | None = None):
+    """Erzeugt Beispielantworten mit dem echten, je Kachel konfigurierten Modell neu.
+
+    Ohne ``tile_id`` werden alle Beispiele neu erzeugt (Achtung: Free-Tier-Limit
+    von ca. 50 Requests/Tag – pro Kachel fallen so viele Requests an wie
+    Assistenten-Antworten im Beispiel enthalten sind).
+    """
+    _check_admin(request)
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise HTTPException(503, "Kein OPENROUTER_API_KEY hinterlegt – Neuerzeugung nicht möglich.")
+
+    tiles = [tile_id] if tile_id else list(EXAMPLES.keys())
+    results = []
+    for tid in tiles:
+        ex = EXAMPLES.get(tid)
+        if not ex:
+            raise HTTPException(404, f"Kein Beispiel für Kachel: {tid}")
+        tile = _tile_or_404(tid)
+        row = db.query1("SELECT system_prompt FROM prompts WHERE tile_id=?", (tid,))
+        prompt = row["system_prompt"] if row else ""
+        cid = f"ex-{tid}"
+        system = build_system(tile, prompt, cid)
+        system += (
+            "\n\n## Beispielmodus\n"
+            "Dies ist ein Beispiellauf für die Anschauung im Produkt. Antworte so, wie du einer "
+            "Kommune in der echten Nutzung antworten würdest – mit Tabellen, benannten Annahmen "
+            "und ohne erfundene Messdaten."
+        )
+        messages: list[dict] = [{"role": "system", "content": system}]
+        neu: list[tuple[str, str]] = []
+        try:
+            for role, content in ex["messages"]:
+                if role == "user":
+                    neu.append((role, content))
+                    messages.append({"role": "user", "content": content})
+                else:
+                    out = await chat_once(tile["model"], messages, api_key, tile["temperature"])
+                    neu.append(("assistant", out))
+                    messages.append({"role": "assistant", "content": out})
+            replace_messages(cid, neu)
+            results.append({
+                "tile_id": tid, "ok": True, "model": tile["model"],
+                "chars": sum(len(c) for _, c in neu),
+            })
+        except Exception as e:  # noqa: BLE001 – Fehler je Kachel zurückmelden
+            results.append({"tile_id": tid, "ok": False, "model": tile["model"], "error": str(e)})
+    return {"results": results}
 
 
 # ---------------------------------------------------------------- static

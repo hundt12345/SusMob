@@ -20,19 +20,22 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
-from server import db
+from server import calc, db, eval as eval_mod, exports, limits, llm, parse as parse_mod, schema as schema_mod
 from server.envfile import load as load_env
 from server.examples import EXAMPLES, replace_messages, seed_examples
 from server.files import extract_text, SUPPORTED
-from server.llm import chat_once, stream_chat
-from server.seed import FREE_MODELS, seed_all
+from server.llm import chat_once, chat_json, check_health, models_catalog, stream_chat
+from server.seed import EMPFEHLUNG_MODELLE, FALLBACK_KETTEN, FREE_MODELS, seed_all
 
 ROOT = Path(__file__).resolve().parent.parent
 load_env(ROOT / ".env")  # OPENROUTER_API_KEY / ADMIN_PASSWORD aus .env
 
-DATA_DIR = ROOT / "data"
+# Datenverzeichnis: per SUSMOB_DATA_DIR übersteuerbar (z. B. gemountetes Volume beim Hosting)
+DATA_DIR = Path(os.environ.get("SUSMOB_DATA_DIR") or (ROOT / "data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+ARTIFACT_DIR = DATA_DIR / "artifacts"
+ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 MAX_TOTAL_FILE_CHARS = 48_000
@@ -46,6 +49,10 @@ app = FastAPI(title="SusMob API")
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 _admin_tokens: set[str] = set()
+
+# Datenschutz-Flag (Plan Phase 4): Im Demo-Betrieb dürfen nur unkritische Daten
+# verarbeitet werden, weil Gratis-Provider Prompts zum Training nutzen dürfen.
+DEMO_ONLY = os.environ.get("SUSMOB_DEMO_ONLY", "0").strip() not in ("", "0", "false", "no")
 
 MODELS = [
     "anthropic/claude-sonnet-4",
@@ -106,6 +113,47 @@ def _llm_error_text(err: Exception) -> str:
             "oder über `/api/models/status`."
         )
     return f"OpenRouter-Fehler: {text}"
+
+
+def audit(event: str, tile_id: str | None = None, conversation_id: str | None = None,
+          detail: str = "", actor: str = "lokal") -> None:
+    """Audit-Log (Phase 0): wer/wann/was – ohne Personenbezug, nur Ereignis + Kontext."""
+    try:
+        db.exec(
+            "INSERT INTO audit_log (ts, actor, event, tile_id, conversation_id, detail) VALUES (?,?,?,?,?,?)",
+            (_now(), actor, event, tile_id, conversation_id, str(detail)[:1000]),
+        )
+    except Exception:  # noqa: BLE001 – Audit darf den Betrieb nie stoppen
+        pass
+
+
+def _fallbacks(tile: dict) -> list[str]:
+    """Fallback-Kette der Kachel (Admin-Einstellung, sonst Seed-Vorschlag)."""
+    raw = (tile.get("fallback_models") or "").strip()
+    if raw:
+        try:
+            chain = json.loads(raw)
+            if isinstance(chain, list):
+                return [str(m) for m in chain if m]
+        except json.JSONDecodeError:
+            return [m.strip() for m in raw.split(",") if m.strip()]
+    return FALLBACK_KETTEN.get(tile["id"], [m for m in FREE_MODELS if m != tile["model"]][:2])
+
+
+def _bremse_pruefen(request: Request, zeichen: int = 0) -> str:
+    """Limit-/Budgetprüfung vor jedem LLM-Call (öffentliche Test-Instanzen)."""
+    ip = limits.client_ip(request)
+    try:
+        limits.BREMSE.pruefen(ip, zeichen)
+    except limits.LimitError as e:
+        audit("limit_erreicht", None, None, f"{ip}: {e}")
+        raise HTTPException(e.status, str(e)) from e
+    limits.BREMSE.notieren(ip)
+    return ip
+
+
+def _health_map() -> dict[str, dict]:
+    return {r["model"]: dict(r) for r in db.query("SELECT * FROM model_health")}
 
 
 def _config_lines(tid: str) -> list[str]:
@@ -195,6 +243,7 @@ class TileIn(BaseModel):
     model: Optional[str] = None
     temperature: Optional[float] = None
     system_prompt: Optional[str] = None
+    fallback_models: Optional[list[str]] = None
 
 
 class LoginIn(BaseModel):
@@ -269,6 +318,22 @@ def models_status():
     }
 
 
+@app.get("/api/status")
+def app_status(request: Request):
+    """Betriebsstatus für die Oberfläche: Demo-Flag (Datenschutz), Limits, Key."""
+    ip = limits.client_ip(request)
+    st = limits.BREMSE.status(ip)
+    return {
+        "demo_only": DEMO_ONLY,
+        "api_key": bool(os.environ.get("OPENROUTER_API_KEY", "")),
+        "live_liste": bool(_MODEL_CACHE["items"]),
+        "admin_geschuetzt": bool(ADMIN_PASSWORD),
+        "limits": st,
+        "rest_heute": max(0, (st["tagesbudget"] - st["verbraucht_heute"])) if st["tagesbudget"] else None,
+        "version": "SusMob 0.4 (Phase 0+1)",
+    }
+
+
 @app.get("/api/tiles/{tid}/standardwerte")
 def get_std(tid: str):
     _tile_or_404(tid)
@@ -328,13 +393,33 @@ def list_conversations(tile_id: str | None = None):
 def get_conversation(cid: str):
     conv = _conv_or_404(cid)
     conv["messages"] = [
-        dict(r) for r in db.query("SELECT role, content, created_at FROM messages WHERE conversation_id=? ORDER BY id", (cid,))
+        dict(r) for r in db.query(
+            "SELECT role, content, created_at, model, prompt_tokens, completion_tokens, cost_usd, duration_ms "
+            "FROM messages WHERE conversation_id=? ORDER BY id", (cid,))
     ]
     conv["files"] = [
         {"id": r["id"], "filename": r["filename"], "size": r["size"], "extracted_chars": r["extracted_chars"]}
         for r in db.query("SELECT id, filename, size, extracted_chars FROM files WHERE conversation_id=? ORDER BY created_at", (cid,))
     ]
+    conv["artifacts"] = [
+        {"id": r["id"], "kind": r["kind"], "filename": r["filename"], "size": r["size"],
+         "created_at": r["created_at"], "meta": json.loads(r["meta"] or "{}")}
+        for r in db.query(
+            "SELECT id, kind, filename, size, created_at, meta FROM artifacts WHERE conversation_id=? "
+            "ORDER BY created_at DESC", (cid,))
+    ]
+    conv["kosten"] = dict(db.query1(
+        "SELECT COUNT(*) AS calls, COALESCE(SUM(total_tokens),0) AS tokens, "
+        "COALESCE(SUM(cost_usd),0) AS kosten_usd, COALESCE(SUM(tokens_estimated),0) AS geschaetzt "
+        "FROM llm_calls WHERE conversation_id=?", (cid,)) or {}) if _has_table("llm_calls") else {}
     return conv
+
+
+def _has_table(name: str) -> bool:
+    try:
+        return bool(db.query1("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 @app.post("/api/conversations/{cid}/duplicate")
@@ -429,7 +514,7 @@ def delete_file(cid: str, fid: str):
 
 
 @app.post("/api/conversations/{cid}/chat")
-async def chat(cid: str, body: ChatIn):
+async def chat(request: Request, cid: str, body: ChatIn):
     conv = _conv_or_404(cid)
     if conv.get("is_example"):
         raise HTTPException(
@@ -444,6 +529,7 @@ async def chat(cid: str, body: ChatIn):
     text = body.message.strip()
     if not text:
         raise HTTPException(400, "Leere Nachricht")
+    _bremse_pruefen(request, len(text))
 
     ts = _now()
     db.exec(
@@ -468,6 +554,9 @@ async def chat(cid: str, body: ChatIn):
     messages.append({"role": "user", "content": text})
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if DEMO_ONLY:
+        audit("chat_demo_betrieb", tile["id"], cid,
+              "SUSMOB_DEMO_ONLY aktiv – Anfrage über Gratis-Modell (Training mit Prompts möglich)")
 
     async def gen():
         full: list[str] = []
@@ -488,21 +577,40 @@ async def chat(cid: str, body: ChatIn):
             yield _sse("done", {})
             return
         try:
-            async for tok in stream_chat(tile["model"], messages, api_key, tile["temperature"]):
-                full.append(tok)
-                yield _sse("token", {"t": tok})
+            async for ev, data in stream_chat(
+                tile["model"], messages, api_key, tile["temperature"],
+                fallbacks=_fallbacks(tile), feature="chat", tile_id=tile["id"], conversation_id=cid,
+            ):
+                if ev == "token":
+                    full.append(data["t"])
+                    yield _sse("token", data)
+                elif ev == "notice":
+                    yield _sse("notice", data)
+                elif ev == "usage":
+                    db.exec(
+                        "INSERT INTO messages (conversation_id, role, content, created_at, model, "
+                        "prompt_tokens, completion_tokens, cost_usd, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (cid, "assistant", "".join(full), _now(), data.get("model"),
+                         data.get("prompt_tokens", 0), data.get("completion_tokens", 0),
+                         data.get("cost_usd", 0.0), data.get("duration_ms", 0)),
+                    )
+                    audit("chat", tile["id"], cid, f"Modell {data.get('model')} · "
+                          f"{data.get('prompt_tokens', 0)}/{data.get('completion_tokens', 0)} Tokens · "
+                          f"{data.get('cost_usd', 0.0):.5f} $ · {data.get('duration_ms', 0)} ms"
+                          + (" (Fallback)" if data.get("degraded") else ""))
+                    yield _sse("usage", data)
         except Exception as e:  # noqa: BLE001
             if full:
                 db.exec(
-                    "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?,?,?,?)",
-                    (cid, "assistant", "".join(full), _now()),
+                    "INSERT INTO messages (conversation_id, role, content, created_at, model) VALUES (?,?,?,?,?)",
+                    (cid, "assistant", "".join(full), _now(), tile["model"]),
                 )
+            audit("chat_error", tile["id"], cid, _llm_error_text(e)[:400])
             yield _sse("error", {"error": _llm_error_text(e)})
             return
-        db.exec(
-            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?,?,?,?)",
-            (cid, "assistant", "".join(full), _now()),
-        )
+        if not full:
+            yield _sse("error", {"error": "Das Modell hat eine leere Antwort geliefert – bitte erneut senden."})
+            return
         yield _sse("done", {})
 
     return StreamingResponse(
@@ -510,6 +618,210 @@ async def chat(cid: str, body: ChatIn):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ------------------------------------------- Rechenkern, Auswertung & Exporte
+
+
+class CalcIn(BaseModel):
+    params: dict = {}
+
+
+@app.post("/api/calc/{tid}")
+def calc_stateless(tid: str, body: CalcIn):
+    """Deterministische Rechnung ohne LLM (Phase 2) – testbar, reproduzierbar."""
+    _tile_or_404(tid)
+    return calc.rechnen(tid, body.params)
+
+
+def _letzte_assistenz(cid: str) -> str:
+    row = db.query1(
+        "SELECT content FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+        (cid,),
+    )
+    return row["content"] if row else ""
+
+
+def _artefakt_anlegen(cid: str, tile_id: str, kind: str, filename: str, data: bytes,
+                      meta: dict | None = None) -> dict:
+    aid = uuid.uuid4().hex
+    dest = ARTIFACT_DIR / cid
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / f"{aid}_{filename}"
+    path.write_bytes(data)
+    db.exec(
+        "INSERT INTO artifacts (id, conversation_id, tile_id, kind, filename, stored_path, size, meta, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (aid, cid, tile_id, kind, filename, str(path), len(data),
+         json.dumps(meta or {}, ensure_ascii=False), _now()),
+    )
+    audit("artefakt", tile_id, cid, f"{kind}: {filename} ({len(data)} Bytes)")
+    return {"id": aid, "kind": kind, "filename": filename, "size": len(data),
+            "url": f"/api/artifacts/{aid}", "meta": meta or {}}
+
+
+async def _auswertung(cid: str, tile: dict, *, frisch: bool = False, extrahieren: bool = True) -> dict:
+    """Strukturierte Auswertung des Gesprächs: LLM extrahiert, Code rechnet.
+
+    Ergebnis wird als JSON-Artefakt (``kind='daten'``) gespeichert und beim
+    Export wiederverwendet – so bleibt der Export reproduzierbar und spart Tokens.
+    """
+    if not frisch:
+        row = db.query1(
+            "SELECT meta FROM artifacts WHERE conversation_id=? AND kind='daten' ORDER BY created_at DESC LIMIT 1",
+            (cid,),
+        )
+        if row:
+            try:
+                cached = json.loads(row["meta"] or "{}")
+                # Nur verwenden, wenn wirklich etwas berechnet wurde bzw. Schema-Daten vorliegen
+                if cached.get("berechnet") or cached.get("strukturiert"):
+                    return cached
+            except json.JSONDecodeError:
+                pass
+    strukturiert: dict = {}
+    modell = ""
+    fehler = ""
+    extraktion_fehler = ""
+    if extrahieren:
+        j_schema = schema_mod.SCHEMAS.get(tile["id"])
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        if j_schema and api_key:
+            system = build_system(tile, db.query1(
+                "SELECT system_prompt FROM prompts WHERE tile_id=?", (tile["id"],))["system_prompt"], cid)
+            system += ("\n\n## Aufgabe: Datenextraktion\n"
+                       f"{schema_mod.FELDER.get(tile['id'], '')}\n"
+                       "Übernimm nur Angaben aus dem Gespräch und den Dateien. Was fehlt, bleibt weg – "
+                       "nichts schätzen, nichts ergänzen.")
+            hist = db.query(
+                "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 12", (cid,))
+            messages = [{"role": "system", "content": system}]
+            messages += [{"role": r["role"], "content": r["content"]} for r in reversed(hist)]
+            messages.append({"role": "user", "content":
+                             "Gib die strukturierten Daten dieses Gesprächs als JSON aus."})
+            try:
+                daten, result = await chat_json(
+                    tile["model"], messages, api_key, j_schema, fallbacks=_fallbacks(tile),
+                    feature="extract", tile_id=tile["id"], conversation_id=cid)
+                strukturiert = daten
+                modell = result.model
+            except Exception as e:  # noqa: BLE001 – Extraktion darf den Export nicht blockieren
+                fehler = f"Extraktion fehlgeschlagen: {e}"
+        elif not api_key:
+            fehler = "Kein OPENROUTER_API_KEY – Auswertung ohne strukturierte Extraktion (nur Antworttext)."
+        else:
+            fehler = "Für diese Kachel ist kein Structured-Output-Schema definiert – nur Antworttext."
+    ergebnis = calc.rechnen(tile["id"], strukturiert) if strukturiert else {}
+    if not ergebnis or ergebnis.get("typ") == "kennzahlen":
+        # Kein Schema/kein Netz: Zahlen deterministisch aus dem Antworttext ziehen
+        aus_text = parse_mod.parse(tile["id"], _letzte_assistenz(cid))
+        if aus_text:
+            ergebnis = aus_text
+            extraktion_fehler = fehler
+            fehler = aus_text["pruefungen"][0] if aus_text.get("pruefungen") else ""
+        else:
+            extraktion_fehler = fehler
+    payload = {
+        "tile_id": tile["id"],
+        "strukturiert": strukturiert,
+        "berechnet": ergebnis,
+        "modell": modell,
+        "fehler": fehler,
+        "extraktion_fehler": extraktion_fehler,
+        "erstellt": _now(),
+    }
+    _artefakt_anlegen(cid, tile["id"], "daten", f"{tile['id']}-auswertung.json",
+                      json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                      {"strukturiert": strukturiert, "berechnet": ergebnis, "modell": modell, "fehler": fehler})
+    return payload
+
+
+@app.post("/api/conversations/{cid}/auswertung")
+async def auswertung(request: Request, cid: str, frisch: int = 0):
+    """Strukturierte Auswertung (Phase 1): Schema-Extraktion + Rechenkern."""
+    _bremse_pruefen(request)
+    conv = _conv_or_404(cid)
+    tile = _tile_or_404(conv["tile_id"])
+    result = await _auswertung(cid, tile, frisch=bool(frisch))
+    result["antwort"] = _letzte_assistenz(cid)
+    return result
+
+
+class ExportIn(BaseModel):
+    titel: str = ""
+
+
+@app.post("/api/conversations/{cid}/export/{fmt}")
+async def export_artifact(request: Request, cid: str, fmt: str, body: ExportIn | None = None, frisch: int = 0):
+    """Export: ``xlsx`` (Formeln + Annahmen-Blatt) oder ``json`` (Maschinendaten)."""
+    fmt = fmt.lower().strip()
+    if fmt in ("xls", "excel"):
+        fmt = "xlsx"
+    if fmt == "pdf":
+        # PDF entsteht bewusst clientseitig über Druck-CSS (Plan 4.3, Weg A)
+        raise HTTPException(400, "PDF wird über die Druckansicht erzeugt (🖨️ im Chat).")
+    if fmt not in ("xlsx", "json"):
+        raise HTTPException(400, "Unbekanntes Format – erlaubt: xlsx, json (PDF = Druckansicht).")
+    conv = _conv_or_404(cid)
+    tile = _tile_or_404(conv["tile_id"])
+    if frisch:
+        _bremse_pruefen(request)
+    aus = await _auswertung(cid, tile, frisch=bool(frisch))
+    antwort = _letzte_assistenz(cid)
+    titel = (body.titel if body else "") or conv["title"]
+    model_row = db.query1(
+        "SELECT model FROM messages WHERE conversation_id=? AND model IS NOT NULL AND model != '' "
+        "ORDER BY id DESC LIMIT 1", (cid,))
+    modell = (model_row["model"] if model_row else "") or tile["model"]
+    if fmt == "xlsx":
+        daten = exports.build_workbook(
+            tile_name=tile["name"], conversation_title=titel, calc=aus.get("berechnet") or None,
+            structured=aus.get("strukturiert") or None, answer=antwort, model=modell, created_at=_now())
+    else:
+        daten = exports.json_artefakt(tile["name"], aus.get("berechnet"), aus.get("strukturiert"), antwort, modell)
+    info = _artefakt_anlegen(cid, tile["id"], fmt, exports.dateiname(tile["id"], fmt, titel), daten,
+                             {"rechenkern": (aus.get("berechnet") or {}).get("typ", ""),
+                              "modell": modell, "warnung": aus.get("fehler", "")})
+    info["hinweis"] = aus.get("fehler", "")
+    return info
+
+
+@app.get("/api/artifacts/{aid}")
+def download_artifact(aid: str):
+    row = db.query1("SELECT * FROM artifacts WHERE id=?", (aid,))
+    if not row:
+        raise HTTPException(404, "Artefakt nicht gefunden")
+    path = Path(row["stored_path"])
+    if not path.exists():
+        raise HTTPException(410, "Datei ist nicht mehr vorhanden")
+    typen = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+             "json": "application/json", "daten": "application/json"}
+    return FileResponse(path, filename=row["filename"],
+                        media_type=typen.get(row["kind"], "application/octet-stream"))
+
+
+@app.delete("/api/artifacts/{aid}")
+def delete_artifact(aid: str):
+    row = db.query1("SELECT stored_path FROM artifacts WHERE id=?", (aid,))
+    if not row:
+        raise HTTPException(404, "Artefakt nicht gefunden")
+    p = Path(row["stored_path"])
+    if p.exists():
+        p.unlink()
+    db.exec("DELETE FROM artifacts WHERE id=?", (aid,))
+    return {"ok": True}
+
+
+@app.get("/api/tiles/{tid}/schema")
+def tile_schema(tid: str):
+    """Structured-Output-Schema der Kachel (transparent für Admin & Export)."""
+    _tile_or_404(tid)
+    return {
+        "tile_id": tid,
+        "schema": schema_mod.SCHEMAS.get(tid),
+        "felder": schema_mod.FELDER.get(tid, ""),
+        "rechenkern": tid in ("co2-bilanz", "opnv-planung", "wegeplanung", "massnahmenplanung"),
+    }
 
 
 # ---------------------------------------------------------------- admin API
@@ -554,6 +866,8 @@ def admin_update_tile(request: Request, tid: str, body: TileIn):
         sets.append("model=?"); params.append(body.model)
     if body.temperature is not None:
         sets.append("temperature=?"); params.append(body.temperature)
+    if body.fallback_models is not None:
+        sets.append("fallback_models=?"); params.append(json.dumps(body.fallback_models, ensure_ascii=False))
     if sets:
         db.exec(f"UPDATE tiles SET {', '.join(sets)} WHERE id=?", (*params, tid))
     if body.system_prompt is not None:
@@ -570,6 +884,10 @@ def admin_update_tile(request: Request, tid: str, body: TileIn):
             "ON CONFLICT(tile_id) DO UPDATE SET system_prompt=excluded.system_prompt, updated_at=excluded.updated_at",
             (tid, body.system_prompt, ts),
         )
+        audit("prompt_geaendert", tid, None, f"{len(body.system_prompt)} Zeichen")
+    if body.model is not None or body.temperature is not None or body.fallback_models is not None:
+        audit("modell_geaendert", tid, None,
+              f"model={body.model} temp={body.temperature} kette={body.fallback_models}")
     return {"ok": True}
 
 
@@ -638,8 +956,12 @@ async def admin_test_run(request: Request, tid: str, body: TestIn):
         {"role": "user", "content": body.message},
     ]
     try:
-        content = await chat_once(tile["model"], messages, api_key, tile["temperature"])
-        return {"ok": True, "content": content, "model": tile["model"]}
+        result = await chat_once(tile["model"], messages, api_key, tile["temperature"],
+                                 fallbacks=_fallbacks(tile), feature="admin_test", tile_id=tile["id"])
+        audit("admin_test", tile["id"], None, f"Modell {result.model}")
+        return {"ok": True, "content": result.content, "model": result.model,
+                "angefragt": result.model_requested, "fallback": result.degraded,
+                "usage": result.usage.as_dict, "dauer_ms": result.duration_ms}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, _llm_error_text(e)) from e
 
@@ -703,7 +1025,10 @@ async def admin_examples_regenerate(request: Request, tile_id: str | None = None
                     neu.append((role, content))
                     messages.append({"role": "user", "content": content})
                 else:
-                    out = await chat_once(tile["model"], messages, api_key, tile["temperature"])
+                    res = await chat_once(tile["model"], messages, api_key, tile["temperature"],
+                                          fallbacks=_fallbacks(tile), feature="example_regenerate",
+                                          tile_id=tid)
+                    out = res.content
                     neu.append(("assistant", out))
                     messages.append({"role": "assistant", "content": out})
             replace_messages(cid, neu)
@@ -714,6 +1039,168 @@ async def admin_examples_regenerate(request: Request, tile_id: str | None = None
         except Exception as e:  # noqa: BLE001 – Fehler je Kachel zurückmelden
             results.append({"tile_id": tid, "ok": False, "model": tile["model"], "error": str(e)})
     return {"results": results}
+
+
+# ------------------------------------------------- Kosten, Health, Eval, Audit
+
+
+@app.get("/api/admin/usage")
+def admin_usage(request: Request, days: int = 30):
+    """Token-/Kostenmessung (Phase 0): Messwerte statt Schätzungen."""
+    _check_admin(request)
+    seit = f"datetime('now', '-{max(1, min(days, 365))} days')"
+    gesamt = db.query1(
+        f"SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS prompt_tokens, "
+        f"COALESCE(SUM(completion_tokens),0) AS completion_tokens, COALESCE(SUM(total_tokens),0) AS total_tokens, "
+        f"COALESCE(SUM(cost_usd),0) AS kosten_usd, COALESCE(AVG(duration_ms),0) AS dauer_ms, "
+        f"COALESCE(SUM(tokens_estimated),0) AS geschaetzt, "
+        f"COALESCE(SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END),0) AS fehler "
+        f"FROM llm_calls WHERE created_at >= {seit}")
+    je_kachel = db.query(
+        f"SELECT tile_id, COUNT(*) AS calls, COALESCE(SUM(total_tokens),0) AS tokens, "
+        f"COALESCE(SUM(cost_usd),0) AS kosten_usd, COALESCE(AVG(duration_ms),0) AS dauer_ms "
+        f"FROM llm_calls WHERE created_at >= {seit} GROUP BY tile_id ORDER BY tokens DESC")
+    je_modell = db.query(
+        f"SELECT model, COUNT(*) AS calls, COALESCE(SUM(total_tokens),0) AS tokens, "
+        f"COALESCE(SUM(cost_usd),0) AS kosten_usd, "
+        f"COALESCE(SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END),0) AS fehler, "
+        f"COALESCE(SUM(CASE WHEN attempt>1 THEN 1 ELSE 0 END),0) AS fallbacks "
+        f"FROM llm_calls WHERE created_at >= {seit} GROUP BY model ORDER BY calls DESC")
+    je_tag = db.query(
+        f"SELECT substr(created_at,1,10) AS tag, COUNT(*) AS calls, COALESCE(SUM(cost_usd),0) AS kosten_usd, "
+        f"COALESCE(SUM(total_tokens),0) AS tokens FROM llm_calls WHERE created_at >= {seit} "
+        f"GROUP BY tag ORDER BY tag DESC LIMIT 60")
+    je_feature = db.query(
+        f"SELECT feature, COUNT(*) AS calls, COALESCE(SUM(cost_usd),0) AS kosten_usd, "
+        f"COALESCE(AVG(duration_ms),0) AS dauer_ms FROM llm_calls WHERE created_at >= {seit} "
+        f"GROUP BY feature ORDER BY calls DESC")
+    gesamt = dict(gesamt or {})
+    calls = gesamt.get("calls") or 0
+    return {
+        "zeitraum_tage": days,
+        "gesamt": {
+            **gesamt,
+            "kosten_pro_call_usd": round((gesamt.get("kosten_usd") or 0) / calls, 6) if calls else 0.0,
+            "anteil_geschaetzt_pct": round((gesamt.get("geschaetzt") or 0) / calls * 100, 1) if calls else 0.0,
+        },
+        "je_kachel": [dict(r) for r in je_kachel],
+        "je_modell": [dict(r) for r in je_modell],
+        "je_tag": [dict(r) for r in je_tag],
+        "je_feature": [dict(r) for r in je_feature],
+        "hinweis": "Kosten stammen aus der OpenRouter-usage; bei „geschätzt“ war keine usage im Response "
+                   "(Schätzung über Zeichen/3,3 – siehe Plan Abschnitt 3.1).",
+    }
+
+
+@app.get("/api/admin/health")
+async def admin_health(request: Request, refresh: int = 0):
+    """Modell-Health-Check + Fallback-Kette je Kachel (Plan Phase 0)."""
+    _check_admin(request)
+    tiles = [dict(r) for r in db.query("SELECT * FROM tiles ORDER BY sort")]
+    kette: list[str] = []
+    for t in tiles:
+        for m in [t["model"], *_fallbacks(t)]:
+            if m and m not in kette:
+                kette.append(m)
+    gespeichert = _health_map()
+    if refresh or not gespeichert:
+        frisch = await check_health(kette, persist=True)
+        gespeichert = {r["model"]: dict(r) for r in db.query("SELECT * FROM model_health")}
+    ausgabe = []
+    for t in tiles:
+        fallbacks = _fallbacks(t)
+        eintraege = []
+        for i, m in enumerate([t["model"], *fallbacks]):
+            h = gespeichert.get(m, {})
+            caps = llm.capabilities(m)
+            eintraege.append({
+                "rolle": "primär" if i == 0 else f"fallback {i}",
+                "model": m,
+                "ok": bool(h.get("ok")),
+                "endpunkte": h.get("endpoints", 0),
+                "uptime": round(float(h.get("uptime") or 0) * 100, 1),
+                "geprueft": h.get("checked_at", ""),
+                "hinweis": h.get("note", ""),
+                "kontext": caps.get("context_length", h.get("context_length", 0)),
+                "structured": bool(caps.get("structured_outputs") or h.get("structured")),
+                "vision": bool(caps.get("vision") or h.get("vision")),
+                "gratis": bool(caps.get("free", m.endswith(":free"))),
+            })
+        ausgabe.append({"tile_id": t["id"], "name": f"{t['emoji']} {t['name']}", "kette": eintraege,
+                        "kette_ok": all(e["ok"] or not e["endpunkte"] for e in eintraege),
+                        "empfehlung": EMPFEHLUNG_MODELLE.get(t["id"], ""),
+                        "folgt_empfehlung": EMPFEHLUNG_MODELLE.get(t["id"], t["model"]) == t["model"]})
+    return {
+        "kacheln": ausgabe,
+        "modelle_geprueft": len(kette),
+        "hinweis": "„Endpunkte 0“ heißt: das Modell hat aktuell keinen aktiven Provider – genau der "
+                   "Qwen-Fall aus dem Plan. Die Fallback-Kette fängt das ab; im Admin änderbar.",
+    }
+
+
+@app.get("/api/admin/audit")
+def admin_audit(request: Request, limit: int = 100, event: str | None = None):
+    _check_admin(request)
+    if event:
+        rows = db.query("SELECT * FROM audit_log WHERE event=? ORDER BY id DESC LIMIT ?", (event, min(limit, 500)))
+    else:
+        rows = db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (min(limit, 500),))
+    return [dict(r) for r in rows]
+
+
+class EvalIn(BaseModel):
+    tile_id: Optional[str] = None
+    limit: Optional[int] = None
+
+
+@app.post("/api/admin/eval/run")
+async def admin_eval_run(request: Request, body: EvalIn | None = None):
+    """Eval-Harness (Phase 2): Testfälle automatisch bewerten – Regressionsschutz."""
+    _check_admin(request)
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise HTTPException(503, "Kein OPENROUTER_API_KEY – Eval-Lauf nicht möglich.")
+    tile_ids = [body.tile_id] if (body and body.tile_id) else [r["id"] for r in db.query("SELECT id FROM tiles ORDER BY sort")]
+    limit = (body.limit if body else None)
+    ergebnisse = []
+    for tid in tile_ids:
+        tile = _tile_or_404(tid)
+        row = db.query1("SELECT system_prompt FROM prompts WHERE tile_id=?", (tid,))
+        prompt = row["system_prompt"] if row else ""
+
+        async def call(testfall, tile=tile, prompt=prompt):
+            system = build_system(tile, prompt, test_file=testfall["file_content"] or "")
+            messages = [{"role": "system", "content": system},
+                        {"role": "user", "content": testfall["message"]}]
+            res = await chat_once(tile["model"], messages, api_key, tile["temperature"],
+                                  fallbacks=_fallbacks(tile), feature="eval", tile_id=tid)
+            return res.content, res.usage.cost_usd, res.duration_ms
+
+        ergebnisse.append(await eval_mod.run_tile(tid, call, model=tile["model"], limit=limit))
+    audit("eval_lauf", None, None, f"{len(ergebnisse)} Kacheln")
+    return {"ergebnisse": ergebnisse,
+            "quote_pct": round(sum(e["punkte"] for e in ergebnisse) /
+                               max(1, sum(e["max_punkte"] for e in ergebnisse)) * 100, 1),
+            "kosten_usd": round(sum(e["kosten_usd"] for e in ergebnisse), 5)}
+
+
+@app.get("/api/admin/eval/results")
+def admin_eval_results(request: Request, tile_id: str | None = None, limit: int = 50):
+    _check_admin(request)
+    if tile_id:
+        rows = db.query("SELECT * FROM eval_runs WHERE tile_id=? ORDER BY id DESC LIMIT ?", (tile_id, min(limit, 200)))
+    else:
+        rows = db.query("SELECT * FROM eval_runs ORDER BY id DESC LIMIT ?", (min(limit, 200),))
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["checks"] = json.loads(d.get("checks") or "[]")
+        except json.JSONDecodeError:
+            d["checks"] = []
+        d.pop("content", None)
+        out.append(d)
+    return out
 
 
 # ---------------------------------------------------------------- static

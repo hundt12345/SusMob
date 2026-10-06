@@ -2,7 +2,7 @@
 
 Liest ``KEY=WERT``-Zeilen aus ``<repo>/.env`` und setzt sie als
 Umgebungsvariablen – bereits gesetzte Werte werden nicht überschrieben
-(echte Umgebungsvariablen haben also Vorrang).
+(echte Umgebungsvariablen haben also Vorrang, auch wenn sie leer sind).
 
 Unterstützt Kommentare (``#``) und einfache/doppelte Anführungszeichen.
 """
@@ -27,7 +27,9 @@ def load(path: str | Path) -> list[str]:
         val = val.strip()
         if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
             val = val[1:-1]
-        if not key or not val or os.environ.get(key):
+        # Vorrang hat, was die Umgebung explizit setzt – auch ein leerer Wert
+        # (damit lässt sich der Demo-Modus bewusst erzwingen, z. B. OPENROUTER_API_KEY=).
+        if not key or not val or key in os.environ:
             continue
         os.environ[key] = val
         applied.append(key)

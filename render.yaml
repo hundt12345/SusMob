@@ -1,0 +1,24 @@
+# Render.com Blueprint – kostenlose Test-Instanz mit Live-Chat (Free-Tier-Modelle)
+# 1. Repo bei Render verbinden  2. Blueprint auswählen  3. OPENROUTER_API_KEY + ADMIN_PASSWORD setzen
+services:
+  - type: web
+    name: susmob-test
+    runtime: python
+    plan: free            # Free-Plan: schläft nach ~15 min Inaktivität ein (erster Aufruf ~30 s)
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false       # im Dashboard eintragen (geheim!)
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      # Kostenbremse: Free-Modelle dürfen nur für Demo-Daten genutzt werden
+      - key: SUSMOB_DEMO_ONLY
+        value: "1"
+    disk:
+      name: susmob-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1         # Persistenz für SQLite/Uploads (im Free-Plan kostenpflichtig: 0,25 $/GB/Monat)

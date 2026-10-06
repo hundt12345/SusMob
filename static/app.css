@@ -211,3 +211,91 @@ input[type="range"] { padding: 0; }
 .spin { display: inline-block; animation: rot 1s linear infinite; }
 @keyframes rot { to { transform: rotate(360deg); } }
 .toast { position: fixed; bottom: 1.4rem; left: 50%; transform: translateX(-50%); background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 1.1rem; font-size: 0.85rem; z-index: 50; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+
+/* ---------- Phase 1/2: Auswertung, Export, Charts, Druck ---------- */
+.chatbar {
+  display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+  padding: 0.55rem 1rem; border-bottom: 1px solid var(--border);
+  background: rgba(56,189,248,0.04);
+}
+.chatbar .label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.chatbar .grow { flex: 1; }
+.chatmeta { font-size: 0.72rem; color: var(--muted); }
+.auswertung { padding: 1rem 1.1rem; border-bottom: 1px solid var(--border); background: #0e1830; }
+.auswertung h3 { font-size: 1rem; }
+.aushead { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 0.4rem; }
+.aushead .btn { margin-left: auto; }
+.ausgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+@media (max-width: 900px) { .ausgrid { grid-template-columns: 1fr; } }
+.auswertung h4 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+  margin: 0.8rem 0 0.35rem; }
+.auswertung .hint { font-size: 0.78rem; color: var(--muted); }
+.miniul { margin-left: 1.1rem; font-size: 0.82rem; color: var(--text); }
+.charttitle { font-size: 0.78rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+.chartbox { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.legend { list-style: none; font-size: 0.8rem; }
+.legend li { display: flex; align-items: center; gap: 0.4rem; padding: 0.12rem 0; }
+.legend .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend .muted { color: var(--muted); }
+.bars { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.4rem; }
+.barrow { display: grid; grid-template-columns: minmax(90px, 34%) 1fr auto; gap: 0.5rem; align-items: center; font-size: 0.8rem; }
+.barrow .bl { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btrack { background: #0a101d; border: 1px solid var(--border); border-radius: 6px; height: 14px; overflow: hidden; }
+.bfill { display: block; height: 100%; background: linear-gradient(90deg, #0ea5e9, #38bdf8); }
+.barrow .bv { font-variant-numeric: tabular-nums; }
+.artifactbox { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+.chipfile { display: inline-flex; align-items: center; gap: 0.4rem; background: var(--card2);
+  border: 1px solid var(--border); border-radius: 99px; padding: 0.25rem 0.65rem; }
+.chipfile .x { cursor: pointer; color: var(--muted); }
+.chipfile .muted { color: var(--muted); font-size: 0.72rem; }
+.msgmeta { font-size: 0.68rem; color: var(--muted); margin-top: 0.45rem; font-variant-numeric: tabular-nums; }
+.fallbacknote { font-size: 0.78rem; color: #fbbf24; background: rgba(251,191,36,0.08);
+  border: 1px solid rgba(251,191,36,0.35); border-radius: 9px; padding: 0.4rem 0.7rem; align-self: flex-start; max-width: 85%; }
+
+/* Admin: Tabs, Tabellen, KPIs */
+.tabs { display: flex; gap: 0.4rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.tab { background: var(--card); border: 1px solid var(--border); color: var(--muted);
+  border-radius: 99px; padding: 0.4rem 0.9rem; font-size: 0.85rem; }
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--accent2); border-color: var(--accent2); color: #fff; font-weight: 600; }
+.admintable { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
+.admintable th, .admintable td { border-bottom: 1px solid var(--border); padding: 0.4rem 0.55rem; text-align: left; vertical-align: top; }
+.admintable th { color: var(--muted); font-weight: 600; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.monocell { font-family: var(--mono); font-size: 0.76rem; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.7rem; margin: 0.6rem 0 0.4rem; }
+.kpi { background: #0e1830; border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 0.75rem; }
+.kpi span { display: block; font-size: 0.72rem; color: var(--muted); margin-bottom: 0.2rem; }
+.kpi b { font-size: 1.05rem; }
+.healthblock { border-top: 1px solid var(--border); padding-top: 0.8rem; margin-top: 0.8rem; }
+.healthhead { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.4rem; }
+.healthhead .okbox, .healthhead .errbox { font-size: 0.75rem; }
+
+/* Druckansicht = PDF-Weg A (Plan 4.3) */
+#printArea { display: none; }
+@media print {
+  @page { size: A4; margin: 18mm 16mm; }
+  body { background: #fff !important; color: #111 !important; }
+  .topbar, .foot, .view, .toast { display: none !important; }
+  body.printing #printArea { display: block !important; color: #111; font-size: 10.5pt; }
+  #printArea h1 { font-size: 17pt; margin-bottom: 0.1rem; }
+  #printArea h2 { font-size: 12pt; margin: 0.9rem 0 0.3rem; border-bottom: 1px solid #999; padding-bottom: 0.15rem; }
+  #printArea table { border-collapse: collapse; width: 100%; font-size: 9.5pt; margin: 0.5rem 0; }
+  #printArea th, #printArea td { border: 1px solid #888; padding: 3px 5px; text-align: left; }
+  #printArea tr.sum td { font-weight: 700; background: #eee; }
+  #printArea .printhead { display: flex; justify-content: space-between; align-items: flex-start;
+    border-bottom: 2px solid #222; padding-bottom: 0.4rem; margin-bottom: 0.6rem; }
+  #printArea .printbrand { font-size: 8.5pt; letter-spacing: 0.08em; text-transform: uppercase; color: #555; }
+  #printArea .printsub { font-size: 9.5pt; color: #444; }
+  #printArea .printlogo { font-size: 8.5pt; color: #777; border: 1px dashed #999; padding: 6px 10px; }
+  #printArea .bars .btrack { border: 1px solid #888; background: #fff; }
+  #printArea .bars .bfill { background: #444 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  #printArea .printfoot { font-size: 8pt; color: #555; margin-top: 1rem; border-top: 1px solid #bbb; padding-top: 0.3rem; }
+  #printArea ul { margin-left: 1.1rem; }
+  #printArea .printmd table { page-break-inside: avoid; }
+}
+
+/* Betriebs-/Datenschutzhinweis über dem Chat */
+.betriebshinweis { font-size: 0.78rem; color: #fbbf24; background: rgba(251,191,36,0.07);
+  border-bottom: 1px solid rgba(251,191,36,0.25); padding: 0.5rem 1rem; line-height: 1.5; }
+.betriebshinweis strong { color: #fde68a; }

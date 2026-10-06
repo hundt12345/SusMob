@@ -8,6 +8,8 @@ Neue Kachel hinzufügen:
 """
 from __future__ import annotations
 
+import json
+
 from server import db
 
 TILES = [
@@ -16,7 +18,7 @@ TILES = [
      "nvidia/nemotron-3-ultra-550b-a55b:free", 0.2, 1),
     ("beschlussvorlagen", "📄", "Beschlussvorlagen & Förderanträge",
      "Formgerechte Vorlagen für politische Gremien und passende Förderprogramme (Klimafonds/KIP, NAPE & Co.).",
-     "qwen/qwen3.8-27b:free", 0.2, 2),
+     "apodex/apodex-1.1-mini:free", 0.2, 2),
     ("klimaschutzkonzept", "🎯", "Klimaschutzkonzept",
      "Aufbau und Inhalte eines kommunalen Klimaschutzkonzepts: Ist-Bilanz, Zielbild, Sektoren, Monitoring.",
      "nvidia/nemotron-3-super-120b-a12b:free", 0.2, 3),
@@ -47,6 +49,56 @@ FREE_MODELS = [
     "apodex/apodex-1.1-mini:free",
     "openai/gpt-oss-120b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
+]
+
+# Fallback-Kette je Kachel (Phase 0): Modell 2 und 3 werden genutzt, wenn das
+# Erstmodell keinen aktiven Endpunkt hat, 429 liefert oder mit 5xx/Timeout
+# antwortet. Reihenfolge = Qualität nach Index, dabei unterschiedliche Anbieter,
+# damit ein Anbieterausfall die Kachel nicht lahmlegt. Im Admin-Bereich änderbar.
+FALLBACK_KETTEN: dict[str, list[str]] = {
+    "co2-bilanz": ["nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free",
+                   "thinkingmachines/inkling:free"],
+    "beschlussvorlagen": ["nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3-super-120b-a12b:free",
+                          "google/gemma-4-31b-it:free"],
+    "klimaschutzkonzept": ["thinkingmachines/inkling:free", "nvidia/nemotron-3-ultra-550b-a55b:free",
+                           "google/gemma-4-31b-it:free"],
+    "massnahmenplanung": ["nvidia/nemotron-3-ultra-550b-a55b:free", "google/gemma-4-26b-a4b-it:free",
+                          "nvidia/nemotron-3-super-120b-a12b:free"],
+    "wegeplanung": ["google/gemma-4-26b-a4b-it:free", "nvidia/nemotron-3-super-120b-a12b:free",
+                    "thinkingmachines/inkling:free"],
+    "argumentation": ["nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free",
+                      "google/gemma-4-26b-a4b-it:free"],
+    "opnv-planung": ["nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-ultra-550b-a55b:free",
+                     "google/gemma-4-31b-it:free"],
+}
+
+# Frühere Seed-Ketten (werden beim Start auf die neue, längere Fassung gehoben,
+# sofern der Admin die Kette nicht selbst geändert hat).
+ALTE_FALLBACK_KETTEN = {
+    '["nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free"]',
+    '["nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3-super-120b-a12b:free"]',
+    '["nvidia/nemotron-3-ultra-550b-a55b:free", "google/gemma-4-31b-it:free"]',
+    '["thinkingmachines/inkling:free", "nvidia/nemotron-3-ultra-550b-a55b:free"]',
+    '["google/gemma-4-26b-a4b-it:free", "nvidia/nemotron-3-super-120b-a12b:free"]',
+    '["nvidia/nemotron-3-super-120b-a12b:free", "apodex/apodex-1.1-mini:free"]',
+}
+
+# Empfehlung aus dem Plan (Abschnitt 2.3 „Kachel-Fit") als Wunschmodell je Kachel.
+# Wird nur angezeigt/als Kette verwendet – der Admin entscheidet über den Default.
+EMPFEHLUNG_MODELLE: dict[str, str] = {
+    "co2-bilanz": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "beschlussvorlagen": "apodex/apodex-1.1-mini:free",
+    "klimaschutzkonzept": "thinkingmachines/inkling:free",
+    "massnahmenplanung": "google/gemma-4-26b-a4b-it:free",
+    "wegeplanung": "google/gemma-4-31b-it:free",
+    "argumentation": "nvidia/nemotron-3.5-lightning:free",
+    "opnv-planung": "nvidia/nemotron-3-super-120b-a12b:free",
+}
+
+# Modelle, deren Endpunktliste leer ist (kein Provider): Kachel wird beim Start
+# auf ein Modell mit bestätigtem Endpunkt umgestellt (nur wenn unverändert).
+TOTE_DEFAULT_MODELLE = [
+    ("beschlussvorlagen", "qwen/qwen3.8-27b:free", "apodex/apodex-1.1-mini:free"),
 ]
 
 # Modelle, die in früheren Versionen als Default gesetzt waren und beim Start
@@ -386,6 +438,24 @@ def _migrate() -> None:
         if row and row["model"] in ALTE_DEFAULT_MODELLE:
             db.exec("UPDATE tiles SET model=? WHERE id=?", (model, tid))
 
+    # Modelle ohne aktiven Endpunkt ersetzen (Qwen-Fall, Plan Abschnitt 0.3):
+    # nur wenn die Kachel noch auf dem toten Default steht.
+    for tid, tot, neu in TOTE_DEFAULT_MODELLE:
+        row = db.query1("SELECT model FROM tiles WHERE id=?", (tid,))
+        if row and row["model"] == tot:
+            db.exec("UPDATE tiles SET model=? WHERE id=?", (neu, tid))
+
+    # Fallback-Ketten nachtragen (leer = noch nie gesetzt) bzw. frühere Seed-Ketten
+    # auf die längere Fassung heben (eigene Admin-Ketten bleiben unangetastet).
+    for tid, kette in FALLBACK_KETTEN.items():
+        row = db.query1("SELECT fallback_models FROM tiles WHERE id=?", (tid,))
+        if row is None:
+            continue
+        aktuell = (row["fallback_models"] or "").strip()
+        if not aktuell or aktuell in ALTE_FALLBACK_KETTEN:
+            db.exec("UPDATE tiles SET fallback_models=? WHERE id=?",
+                    (json.dumps(kette, ensure_ascii=False), tid))
+
     for tid, old, new in PROMPT_FIXES:
         row = db.query1("SELECT system_prompt FROM prompts WHERE tile_id=?", (tid,))
         if not row or old not in row["system_prompt"]:
@@ -406,8 +476,10 @@ def _insert_all() -> None:
     with db.get() as conn:
         for tid, emoji, name, short, model, temp, sort in TILES:
             conn.execute(
-                "INSERT INTO tiles (id, emoji, name, short, model, temperature, sort) VALUES (?,?,?,?,?,?,?)",
-                (tid, emoji, name, short, model, temp, sort),
+                "INSERT INTO tiles (id, emoji, name, short, model, temperature, sort, fallback_models) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (tid, emoji, name, short, model, temp, sort,
+                 json.dumps(FALLBACK_KETTEN.get(tid, []), ensure_ascii=False)),
             )
             prompt = PROMPTS.get(tid, "Du bist ein hilfsbereiter Experte.")
             conn.execute(

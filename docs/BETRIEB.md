@@ -11,7 +11,7 @@ und möglichst nichts kostet. Stand: 06.10.2026.
 |---|---|
 | Sollen **fremde Besucher** chatten? | Ja → Tages-/Stundenlimit setzen (`SUSMOB_DAILY_REQUEST_BUDGET`, `SUSMOB_CHAT_LIMIT_PER_HOUR`) und `ADMIN_PASSWORD` setzen. |
 | Gehen **echte Kommunaldaten** durch die Seite? | Nein → `SUSMOB_DEMO_ONLY=1` (Banner + Audit-Eintrag). Gratis-Provider dürfen Prompts zum Training nutzen. |
-| Muss der **Verlauf erhalten** bleiben? | Ja → Hosting mit Volume/Dateisystem (Fly.io, eigener Server, Hugging Face mit Storage). Bei Render-Freeservices ist das Dateisystem flüchtig (außer kostenpflichtiger Disk). |
+| Muss der **Verlauf erhalten** bleiben? | Ja → Hosting mit Volume/Dateisystem (Fly.io, eigener Server, Hugging Face mit Storage) oder Render mit bezahltem Instanztyp + Disk. Render-**Free** ist flüchtig und kann gar kein Disk anhängen. |
 
 ---
 
@@ -20,7 +20,7 @@ und möglichst nichts kostet. Stand: 06.10.2026.
 | Weg | Aufwand | Kosten | Live-Chat | Dauerhaftigkeit | Bewertung |
 |---|---|---|---|---|---|
 | **A. Eigener Rechner + Cloudflare Tunnel** | 5 Min | **0 €** | ✅ | solange PC läuft | **Empfehlung für schnelle Tests** – keine Kreditkarte, kein Sleep, volle SQLite-Persistenz |
-| **B. Render (Free-Plan)** | 10 Min | 0 € (Sleep nach ~15 min) | ✅ | FS flüchtig, Disk kostet | beste „echte" URL ohne eigenen Rechner |
+| **B. Render (Free-Plan, Docker)** | 10 Min | 0 € (Sleep nach 15 min) | ✅ | FS flüchtig, **kein Disk im Free-Plan** | beste „echte" URL ohne eigenen Rechner |
 | **C. Hugging Face Spaces (Docker)** | 15 Min | 0 € | ✅ | Space schläft, Storage kostenpflichtig | gut für Demo mit Code-Repos |
 | **D. Fly.io / Railway** | 20 Min | ~2–5 $/Monat | ✅ | Volume verfügbar | beste Zuverlässigkeit im Kleinformat |
 | **E. Vercel/Netlify** | – | 0 € | ⚠️ | – | **ungeeignet**: keine dauerhafte SQLite-Datei, Serverless ohne Streaming-Session über Minuten |
@@ -60,20 +60,63 @@ SUSMOB_MAX_MESSAGE_CHARS=8000
 
 ## 3. Weg B – Render.com (URL ohne eigenen Rechner)
 
-1. Repository zu GitHub pushen (Datei `render.yaml` liegt bei).
-2. Render → **New → Blueprint** → Repo wählen. Der Blueprint legt einen Free-Webservice an.
-3. Im Dashboard die geheimen Variablen setzen: `OPENROUTER_API_KEY`, `ADMIN_PASSWORD`.
-4. Deploy abwarten → `https://susmob-test.onrender.com`.
+### 3.1 Welche Runtime wählen? → **Docker**
+
+Render bietet als Umgebung u. a. Node, Python, Go, Rust, Elixir und **Docker**. Für SusMob
+**Docker** wählen, denn:
+
+* Im Repo liegt ein `Dockerfile` → Render erkennt es und zieht die Umgebung selbst auf
+  (Python 3.12 fixiert, keine Überraschungen durch Buildpack-Versionen).
+* Der Port wird über `$PORT` gesteuert (Render setzt ihn, Standard `10000`) – das Dockerfile
+  nutzt ihn bereits, also **nichts** an Ports konfigurieren.
+* Health-Check läuft über `/healthz`, das im Image mitgeliefert ist.
+
+Gleichwertige Alternative, falls du lieber nativ (ohne Docker) deployst – dann **Python 3**:
 
 ```
-buildCommand : pip install -r requirements.txt
-startCommand : uvicorn server.main:app --host 0.0.0.0 --port $PORT
-healthcheck  : /healthz
+Build Command : pip install -r requirements.txt
+Start Command : uvicorn server.main:app --host 0.0.0.0 --port $PORT
+Health-Check  : /healthz
+PYTHON_VERSION: 3.12.6   (als Umgebungsvariable)
 ```
 
-**Wichtig:** Im Free-Plan ist das Dateisystem flüchtig – nach Redeploy/Neustart sind Uploads,
-Verlauf und Artefakte weg (Beispiele und Prompts werden neu geseedet). Für Tests okay; für
-Dauerhaftigkeit ein Volume/Disk mounten und `SUSMOB_DATA_DIR=/pfad/zum/volume` setzen.
+### 3.2 Wo kommt der OpenRouter-Key hin?
+
+**Nie ins Repo.** Zwei Wege:
+
+**a) Beim Anlegen über den Blueprint (`render.yaml` vorhanden):** Die Datei enthält
+`OPENROUTER_API_KEY` und `ADMIN_PASSWORD` mit `sync: false` – Render zeigt beim Durchklicken
+des Blueprints genau diese Felder und fragt die Werte ab. Dort einfügen, fertig.
+
+**b) Nachträglich (oder bei manuell angelegtem Service):**
+Dashboard → **Service auswählen** → linke Leiste **Environment** → Abschnitt
+**Environment Variables** → **+ Add Environment Variable**:
+
+| Key | Value |
+|---|---|
+| `OPENROUTER_API_KEY` | `sk-or-v1-…` (dein Key) |
+| `ADMIN_PASSWORD` | frei wählbares Admin-Passwort |
+
+* **Add from .env** gibt es auch: damit lässt sich eine ganze `.env` einfügen (Massenimport).
+* Beim **manuell** angelegten Web Service steht der Abschnitt „Environment Variables" im
+  Anlegeformular unter **Advanced**.
+* **Save changes** löst automatisch ein neues Deploy aus; der Wert ist danach maskiert und
+  kann nur überschrieben, nicht mehr ausgelesen werden.
+
+Wichtig zu wissen: Der Blueprint liest `render.yaml` aus dem gewählten **Branch** – unser Branch
+heißt `arena/42800ec5-susmob` (entweder den beim Blueprint auswählen oder vorher nach `main` mergen).
+
+### 3.3 Grenzen des Free-Plans (ehrlich)
+
+* **512 MB RAM**, anteilige CPU; **schläft nach 15 Minuten ohne Zugriff** ein, Kaltstart ~1 Minute.
+* **750 Freistunden pro Monat** je Workspace (ein durchlaufender Service ≈ 744 h – reicht also).
+* **Kein Disk möglich:** Das Dateisystem ist flüchtig. Nach Spin-down oder Deploy sind Gespräche,
+  Uploads und Exporte weg – **Kacheln, Prompts und die 7 Beispiele werden beim Start automatisch
+  neu angelegt**, die Seite ist also nie „leer". Für einen Demo-Link völlig ausreichend.
+* **Persistenz erst mit bezahltem Instanztyp** (Starter ab ~7 $/Monat) + Disk (0,25 $/GB/Monat):
+  Disk auf `/app/data` mounten – das Dockerfile nutzt genau dieses Verzeichnis (alternativ
+  `SUSMOB_DATA_DIR` auf den Mountpoint setzen).
+* Ein Disk verhindert „Zero-Downtime-Deploys" – für Tests irrelevant.
 
 ---
 
@@ -107,7 +150,7 @@ docker run -d -p 8080:8080 -v susmob_data:/app/data \
 | Posten | Preis |
 |---|---|
 | Gratis-Modelle (OpenRouter `:free`) | **0 €**, aber 50 Requests/Tag (1.000/Tag ab 10 $ einmaligem Guthaben) |
-| Hosting | 0 € (Tunnel/Render-Freiplan) bis ~3–5 €/Monat (Fly.io) |
+| Hosting | 0 € (Tunnel/Render-Freiplan) bis ~3–5 €/Monat (Fly.io); Render mit Disk ab ~7 €/Monat |
 | Domain (optional) | ~10 €/Jahr |
 | **Erdung**: ein qualifizierter Chat mit Frontier-Modell | **0,04–0,12 $** (Plan, Abschnitt 3.3) |
 
@@ -125,7 +168,8 @@ Frontier-Modell liegen bei ~25 $ – die Modellwahl ist eine Qualitäts-, keine 
 - [ ] OpenRouter-Privatsphäre-Einstellung prüfen: „Free-Modelle dürfen Trainingsdaten erhalten" – bewusst entscheiden.
 - [ ] `#/admin → 🩺 Modell-Health` einmal ausführen (Fallback-Ketten prüfen).
 - [ ] `/healthz` als Health-Check beim Hoster eintragen.
-- [ ] Backup: `data/` (susmob.db, uploads, artifacts) sichern.
+- [ ] Backup: `data/` (susmob.db, uploads, artifacts) sichern – bei Render-Free entfällt das (flüchtig).
+- [ ] Bei Render: Runtime **Docker**, Health-Check `/healthz`, Key im Dashboard unter *Environment*.
 
 ---
 

@@ -1,24 +1,49 @@
-# Render.com Blueprint – kostenlose Test-Instanz mit Live-Chat (Free-Tier-Modelle)
-# 1. Repo bei Render verbinden  2. Blueprint auswählen  3. OPENROUTER_API_KEY + ADMIN_PASSWORD setzen
+# Render.com Blueprint – kostenlose Test-Instanz mit Live-Chat (Gratis-Modelle)
+#
+# Nutzung:
+#   1. Render → "New +" → "Blueprint" → Repo und DIESEN Branch wählen
+#      (der Branch ist arena/42800ec5-susmob – alternativ vorher nach main mergen)
+#   2. Render zeigt die Variablen mit "sync: false" und fragt die Werte ab:
+#      OPENROUTER_API_KEY und ADMIN_PASSWORD dort eintragen (landen nicht im Repo!)
+#   3. Deploy abwarten → https://<name>.onrender.com
+#
+# Werte später ändern: Dashboard → Service → "Environment" → "Environment Variables"
 services:
   - type: web
     name: susmob-test
-    runtime: python
-    plan: free            # Free-Plan: schläft nach ~15 min Inaktivität ein (erster Aufruf ~30 s)
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    runtime: docker              # Dockerfile im Repo – zuverlässigster Weg (Versionen fixiert)
+    dockerfilePath: ./Dockerfile
+    plan: free                   # 512 MB RAM, schläft nach 15 min Inaktivität, Kaltstart ~1 min
+    region: frankfurt            # nah an Deutschland
     healthCheckPath: /healthz
+    autoDeploy: true
     envVars:
+      # --- Geheim: Werte werden im Dashboard eingegeben, nie im Repo ---
       - key: OPENROUTER_API_KEY
-        sync: false       # im Dashboard eintragen (geheim!)
+        sync: false
       - key: ADMIN_PASSWORD
         sync: false
-      - key: PYTHON_VERSION
-        value: "3.12.6"
-      # Kostenbremse: Free-Modelle dürfen nur für Demo-Daten genutzt werden
+      # --- Schutz der öffentlichen Test-Instanz (Gratis-Modelle!) ---
       - key: SUSMOB_DEMO_ONLY
         value: "1"
-    disk:
-      name: susmob-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1         # Persistenz für SQLite/Uploads (im Free-Plan kostenpflichtig: 0,25 $/GB/Monat)
+      - key: SUSMOB_DAILY_REQUEST_BUDGET
+        value: "50"                # Free-Tier OpenRouter: 50 Requests/Tag
+      - key: SUSMOB_CHAT_LIMIT_PER_HOUR
+        value: "8"
+      - key: SUSMOB_MAX_MESSAGE_CHARS
+        value: "8000"
+    # PORT setzt Render selbst (Default 10000) – das Dockerfile nutzt $PORT.
+    #
+    # Hinweis Persistenz: Im Free-Plan ist das Dateisystem flüchtig und ein Disk
+    # kann NICHT angehängt werden. Gespräche/Uploads/Exporte sind nach Spin-down
+    # oder Deploy weg (Kacheln, Prompts und Beispiele werden neu geseedet).
+    # Erst mit bezahltem Instanztyp (Starter ab ~7 $/Monat) möglich – dann
+    # SUSMOB_DATA_DIR auf den Mountpoint setzen. Beispiel:
+    #
+    # disk:
+    #   name: susmob-data
+    #   mountPath: /app/data       # 0,25 $/GB/Monat
+    #   sizeGB: 1
+    # envVars:
+    #   - key: SUSMOB_DATA_DIR
+    #     value: /app/data

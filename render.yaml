@@ -1,0 +1,19 @@
+# Render.com: kostenlose Test-Homepage (Docker), Gratis-Modelle, Demo-Daten.
+# Hinweis: Der Free-Tarif hat KEINE persistente Festplatte – data/ wird bei jedem
+# Deploy neu angelegt (Beispiele/Seed entstehen automatisch, Chatverläufe sind dann weg).
+services:
+  - type: web
+    name: susmob-demo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false            # im Dashboard eintragen (Secret)
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SUSMOB_MODE
+        value: demo
+      - key: SUSMOB_ALLOW_FREE_FOR_DATA
+        value: "1"

@@ -16,6 +16,9 @@ const state = {
   adminTiles: [],
   adminTile: null,
   testCases: [],
+  rechner: null,
+  rechnerRes: null,
+  meta: null,
 };
 
 let toastTimer = null;
@@ -122,6 +125,7 @@ function route() {
   if (h === "#/" || h === "#") return viewHome();
   if ((m = h.match(/^#\/tile\/([\w-]+)(?:\/([\w-]+))?/))) return viewTile(m[1], m[2]);
   if (h === "#/admin") return viewAdmin();
+  if (h === "#/admin/system") return viewSystem();
   viewHome();
 }
 
@@ -167,11 +171,14 @@ async function viewTile(tid, sub) {
         <div><h2>${esc(tile.name)}</h2><div class="sub">${esc(tile.short)}</div></div>
       </div>
       <div class="actions">
+        ${tile.hat_rechner ? '<button class="btn ghost" id="rechnerToggle">🧮 Rechner</button>' : ""}
         <button class="btn ghost" id="stdToggle">⚙️ Standardwerte</button>
+        <button class="btn ghost" id="ergebnisBtn" title="Ergebnisdokument erzeugen und Excel/PDF/CSV exportieren">📊 Ergebnis &amp; Export</button>
         <button class="btn primary" id="newConv">+ Neue Unterhaltung</button>
       </div>
     </div>
     <div id="stdPanel" class="stdpanel hidden"></div>
+    <div id="rechnerPanel" class="stdpanel hidden"></div>
     <div class="tilebody">
       <aside class="convs">
         <div class="convs-head">Unterhaltungen</div>
@@ -193,6 +200,8 @@ async function viewTile(tid, sub) {
 
   await loadConvs(tid);
   $("#stdToggle").onclick = () => toggleStd();
+  if ($("#rechnerToggle")) $("#rechnerToggle").onclick = () => toggleRechner();
+  $("#ergebnisBtn").onclick = () => erzeugeErgebnis();
   $("#newConv").onclick = async () => {
     const r = await api("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tile_id: tid }) });
     await loadConvs(tid);
@@ -272,10 +281,160 @@ function renderEmptyChat() {
 async function openConv(cid) {
   try { state.conv = await api("/api/conversations/" + cid); }
   catch (e) { return toast("Fehler: " + e.message); }
+  state.meta = null;
   $$("#convList .convitem").forEach(el => el.classList.toggle("active", el.dataset.cid === cid));
   renderMessages();
   renderFiles();
   renderExampleBar();
+  renderArtefakte();
+}
+
+/* ---------- Rechenkern (Phase 2): Zahlen entstehen im Code ---------- */
+async function toggleRechner() {
+  const panel = $("#rechnerPanel");
+  if (!panel.classList.contains("hidden")) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<h3>🧮 Rechner – ${esc(state.tile.name)}</h3><p class="hint">Lädt …</p>`;
+  let info;
+  try { info = await api(`/api/tiles/${state.tile.id}/rechner`); }
+  catch (e) { panel.innerHTML = `<p class="errbox">⚠️ ${esc(e.message)}</p>`; return; }
+  if (!info.verfuegbar) { panel.innerHTML = `<p class="hint">Für diese Kachel gibt es keinen Rechenkern.</p>`; return; }
+  state.rechner = info;
+  panel.innerHTML = `<h3>🧮 ${esc(info.name)}</h3>
+    <p class="hint">${esc(info.beschreibung)}<br>Die berechneten Zahlen fließen als <b>verbindliche Werte</b> in jeden Chat dieser Kachel ein
+    („Rechnen im Code, formulieren im LLM“) – das Modell rechnet nicht selbst.</p>
+    <div class="stdgrid" id="rechnerGrid">${info.felder.map(f => `
+      <label class="f"><span>${esc(f.label)}${f.unit ? ` <small style="color:var(--muted)">[${esc(f.unit)}]</small>` : ""}</span>
+        <input type="text" data-key="${esc(f.key)}" value="${esc(f.wert ?? "")}" placeholder="${esc(f.default ?? "")}">
+      </label>`).join("")}</div>
+    <div style="margin-top:1rem;display:flex;gap:0.6rem">
+      <button class="btn primary" id="rechnerRun">🧮 Berechnen</button>
+      <span class="hint" id="rechnerHint" style="align-self:center"></span>
+    </div>
+    <div id="rechnerOut"></div>`;
+  $("#rechnerRun").onclick = runRechner;
+}
+
+async function runRechner() {
+  const values = {};
+  $$("#rechnerGrid input").forEach(i => { values[i.dataset.key] = i.value.trim(); });
+  $("#rechnerHint").textContent = "rechnet …";
+  try {
+    const res = await api(`/api/tiles/${state.tile.id}/rechner`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values }),
+    });
+    state.rechnerRes = res;
+    $("#rechnerHint").textContent = "gespeichert – gilt ab jetzt für alle Chats dieser Kachel ✓";
+    $("#rechnerOut").innerHTML = rechnerHtml(res);
+  } catch (e) {
+    $("#rechnerHint").textContent = "";
+    $("#rechnerOut").innerHTML = `<p class="errbox">⚠️ ${esc(e.message)}</p>`;
+  }
+}
+
+function objTable(rows) {
+  if (!rows || !rows.length) return "";
+  const cols = Object.keys(rows[0]);
+  return `<div class="tablewrap"><table><thead><tr>${cols.map(c => `<th>${esc(c.replace(/_/g, " "))}</th>`).join("")}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${cols.map(c => `<td>${esc(r[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+}
+
+function rechnerHtml(res) {
+  const skip = new Set(["titel", "tile_id", "rechner", "eingaben", "annahmen", "rechenweg", "quellen", "tabellen"]);
+  const scalars = Object.entries(res).filter(([k, v]) => !skip.has(k) && (typeof v === "number" || typeof v === "string"));
+  const listen = Object.entries(res).filter(([k, v]) => !skip.has(k) && Array.isArray(v) && v.length && typeof v[0] === "object");
+  const dicts = Object.entries(res).filter(([k, v]) => !skip.has(k) && v && typeof v === "object" && !Array.isArray(v));
+  let html = "";
+  if (scalars.length) html += `<div class="kv">${scalars.map(([k, v]) => `<div><span>${esc(k.replace(/_/g, " "))}</span><b>${esc(v)}</b></div>`).join("")}</div>`;
+  for (const [k, v] of dicts) html += `<h4>${esc(k.replace(/_/g, " "))}</h4>${objTable([v])}`;
+  for (const [k, v] of listen) html += `<h4>${esc(k.replace(/_/g, " "))}</h4>${objTable(v)}`;
+  if (res.rechenweg) html += `<details class="rechenweg"><summary>Rechenweg anzeigen</summary><ul>${res.rechenweg.map(x => `<li>${esc(x)}</li>`).join("")}</ul></details>`;
+  if (res.annahmen) html += `<details class="rechenweg"><summary>Annahmen (${res.annahmen.length})</summary><ul>${res.annahmen.map(x => `<li>${esc(x)}</li>`).join("")}</ul></details>`;
+  const exportbar = `<div style="margin-top:0.8rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+      <button class="btn tiny" onclick="ergebnisAusRechner()" title="Ergebnisdokument mit diesen Zahlen erzeugen">📊 Als Ergebnisdokument übernehmen</button></div>`;
+  return `<div class="rechnerres">${html}${exportbar}</div>`;
+}
+
+/* ---------- Ergebnis & Export (Phase 1) ---------- */
+function artefaktIcon(kind) {
+  return { xlsx: "📊", csv: "🧾", json: "🧩", md: "📝", svg: "📈", html: "🖨️" }[kind] || "📎";
+}
+
+function artefaktHtml() {
+  const list = (state.conv && state.conv.artifacts) || [];
+  if (!list.length) return "";
+  return `<div class="artefakte"><div class="arthead">📦 Artefakte aus diesem Chat</div>
+    ${list.map(a => `<span class="chip${a.kind === "html" ? " klick" : ""}" data-aid="${a.id}" data-kind="${a.kind}" title="${esc(a.filename)}">
+      ${artefaktIcon(a.kind)} ${esc(a.filename)} <span style="color:var(--muted)">(${fmtBytes(a.size)})</span>
+      <a class="dl" href="/api/artifacts/${a.id}/download" download>⬇︎</a>
+      ${a.kind === "html" ? `<span class="print" data-print="${a.id}">drucken</span>` : ""}
+    </span>`).join("")}</div>`;
+}
+
+function exportBarHtml() {
+  if (!state.conv || state.conv.is_example) return "";
+  return `<div class="artefakte exportbar"><div class="arthead">📤 Ergebnisdokument erzeugen &amp; exportieren
+      <span class="hint">(Zahlen aus Rechenkern/Ergebnisdokument, nicht aus dem Modelltext)</span></div>
+    <span class="chipbtn" onclick="erzeugeErgebnis()">📊 Ergebnis erzeugen</span>
+    <span class="chipbtn" onclick="exportiere('xlsx')">📊 Excel</span>
+    <span class="chipbtn" onclick="exportiere('csv')">🧾 CSV</span>
+    <span class="chipbtn" onclick="exportiere('json')">🧩 JSON</span>
+    <span class="chipbtn" onclick="exportiere('md')">📝 Markdown</span>
+    <span class="chipbtn" onclick="exportiere('html')">🖨️ PDF (Druckansicht)</span>
+  </div>`;
+}
+
+function renderArtefakte() {
+  const area = $("#msgArea");
+  if (!area) return;
+  $$(".artefakte", area).forEach(el => el.remove());
+  const html = exportBarHtml() + artefaktHtml();
+  if (html) area.insertAdjacentHTML("beforeend", html);
+  $$("#msgArea .artefakte .print").forEach(el => {
+    el.onclick = (e) => { e.preventDefault(); window.open(`/api/artifacts/${el.dataset.print}/anzeige`, "_blank"); };
+  });
+}
+
+async function erzeugeErgebnis() {
+  if (!state.conv) return toast("Bitte zuerst eine Unterhaltung öffnen.");
+  if (state.conv.is_example) return toast("Beispiel-Unterhaltung ist schreibgeschützt – bitte übernehmen.");
+  const btn = $("#ergebnisBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ erzeuge Ergebnisdokument …"; }
+  try {
+    const r = await api(`/api/conversations/${state.conv.id}/ergebnis`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "Fasse den Gesprächsstand zum Ergebnisdokument zusammen." }),
+    });
+    state.conv = await api("/api/conversations/" + state.conv.id);
+    renderArtefakte();
+    toast(`Ergebnisdokument erzeugt (${r.artifacts.length} Dateien) ✓`);
+    if (state.rechnerRes || true) {
+      const box = $("#rechnerOut");
+      if (box) box.innerHTML = ""; // Panel ggf. zurücksetzen
+    }
+  } catch (e) {
+    toast("Fehler: " + e.message);
+    if (String(e.message).includes("schema-konform")) {
+      alert("Das Modell hat kein gültiges Ergebnisdokument geliefert." + "\n\n" + e.message);
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "📊 Ergebnis & Export"; }
+  }
+}
+
+async function ergebnisAusRechner() {
+  await erzeugeErgebnis();
+}
+
+async function exportiere(format) {
+  if (!state.conv) return toast("Keine Unterhaltung geöffnet.");
+  try {
+    const a = await api(`/api/conversations/${state.conv.id}/export?format=${format}`, { method: "POST" });
+    window.open(`/api/artifacts/${a.id}/download`, "_blank");
+    state.conv = await api("/api/conversations/" + state.conv.id);
+    renderArtefakte();
+    toast(`${a.kind.toUpperCase()} erzeugt ✓`);
+  } catch (e) { toast("Fehler: " + e.message); }
 }
 
 /* Beispiel-Unterhaltung: Banner zeigen, Eingabe sperren */
@@ -309,7 +468,7 @@ function renderMessages() {
   area.innerHTML = msgs.map(m => m.role === "user"
     ? `<div class="msg user">${esc(m.content)}</div>`
     : `<div class="msg bot"><div class="who">🤖 ${esc(state.tile.name)}-Bot</div><div class="body">${md(m.content)}</div></div>`
-  ).join("");
+  ).join("") + artefaktHtml();
   area.scrollTop = area.scrollHeight;
 }
 
@@ -317,7 +476,7 @@ function renderFiles() {
   const box = $("#fileChips");
   const files = state.conv?.files || [];
   box.innerHTML = files.map(f => `
-    <span class="chip">📄 ${esc(f.filename)} <span style="color:var(--muted)">(${fmtBytes(f.size)})</span>
+    <span class="chip">${f.kind === "image" ? "🖼️" : "📄"} ${esc(f.filename)} <span style="color:var(--muted)">(${fmtBytes(f.size)})</span>
       ${f.extracted_chars ? `<span class="ok" title="Inhalt extrahiert">✓</span>` : `<span title="Kein Text extrahierbar">·</span>`}
       <span class="x" data-fid="${f.id}" title="Entfernen">✕</span>
     </span>`).join("");
@@ -409,6 +568,17 @@ async function sendMsg() {
           acc += o.t;
           bodyEl.innerHTML = md(acc) + '<span class="cursor"></span>';
           area.scrollTop = area.scrollHeight;
+        } else if (ev === "retry") {
+          const hint = document.createElement("div");
+          hint.className = "retryhint";
+          hint.textContent = `⚠️ ${o.model} antwortet nicht – Fallback wird versucht (Wartezeit ${o.wait}s)`;
+          botEl.appendChild(hint);
+        } else if (ev === "meta") {
+          state.meta = o;
+          const m = document.createElement("div");
+          m.className = "meta";
+          m.textContent = `Modell: ${o.model}${o.fallback ? " (Fallback)" : ""} · ${o.tokens} Tokens · ${(o.cost_usd || 0).toFixed(4)} $ · ${(o.duration_ms / 1000).toFixed(1)} s`;
+          botEl.appendChild(m);
         } else if (ev === "error") {
           botEl.classList.add("err");
           bodyEl.innerHTML = `<p class="errbox">⚠️ ${esc(o.error)}</p>`;
@@ -462,8 +632,11 @@ async function viewAdmin() {
   if (status.protected && !state.admin.token) return adminLogin();
   view.innerHTML = `<div class="adminhead">
       <h1>⚙️ System-Prompts & Modelle</h1>
-      <p>Pro Kachel: Modell, Temperature, Fach-Prompt, Versionen und Testläufe mit Testdaten.</p>
-      <div class="actions">${status.protected ? `<button class="btn ghost" id="logout">Abmelden</button>` : `<span class="okbox" style="font-size:0.8rem">offen (kein ADMIN_PASSWORD)</span>`}</div>
+      <p>Pro Kachel: Modell, Fallback-Kette, Temperature, Fach-Prompt, Versionen und Testläufe mit Testdaten.</p>
+      <div class="actions">
+        <a class="btn ghost" href="#/admin/system" style="text-decoration:none">📈 Kosten, Health &amp; Eval</a>
+        ${status.protected ? `<button class="btn ghost" id="logout">Abmelden</button>` : `<span class="okbox" style="font-size:0.8rem">offen (kein ADMIN_PASSWORD)</span>`}
+      </div>
     </div>
     <div class="adminbody">
       <aside class="adminlist" id="adminList">Lädt …</aside>
@@ -681,6 +854,140 @@ async function renderAdminMain() {
       btn.disabled = false; btn.textContent = "▶ Testlauf starten";
     }
   };
+}
+
+
+/* ---------- Admin: Kosten, Health, Audit, Eval (Phase 0/2) ---------- */
+async function viewSystem() {
+  navActive("admin");
+  const status = await api("/api/admin/status");
+  if (status.protected && !state.admin.token) return adminLogin();
+  view.innerHTML = `<div class="adminhead">
+      <h1>📈 Betrieb: Kosten, Health, Audit, Eval</h1>
+      <p>Phase 0/2 des Plans: jede Anfrage mit Tokens und Kosten gemessen, Modell-Endpunkte geprüft, Änderungen protokolliert,
+      Testfälle automatisch bewertet.</p>
+      <div class="actions">
+        <a class="btn ghost" href="#/admin" style="text-decoration:none">← Prompts &amp; Modelle</a>
+        ${status.protected ? `<button class="btn ghost" id="logout2">Abmelden</button>` : ""}
+        <span class="okbox" style="font-size:0.8rem">Modus: ${esc(status.mode || "demo")}</span>
+      </div>
+    </div>
+    <div class="syswrap">
+      <div class="card" id="kpiCard">Lädt …</div>
+      <div class="card" id="healthCard">Lädt …</div>
+      <div class="card" id="tabellenCard">Lädt …</div>
+      <div class="card" id="evalCard">Lädt …</div>
+      <div class="card" id="auditCard">Lädt …</div>
+    </div>`;
+  if ($("#logout2")) $("#logout2").onclick = () => { localStorage.removeItem("susmob_admin"); state.admin.token = ""; adminLogin(); };
+  await loadSystem();
+}
+
+function kpi(label, wert, hint) {
+  return `<div class="kpi"><div class="l">${esc(label)}</div><div class="v">${wert}</div>${hint ? `<div class="h">${esc(hint)}</div>` : ""}</div>`;
+}
+
+async function loadSystem() {
+  let m;
+  try { m = await api("/api/admin/metrics?days=30"); }
+  catch (e) { $("#kpiCard").innerHTML = `<p class="errbox">⚠️ ${esc(e.message)}</p>`; return; }
+  const k = m.kennzahlen || {};
+  $("#kpiCard").innerHTML = `<h3>💰 Kosten &amp; Tokens (30 Tage)</h3>
+    <div class="kpis">
+      ${kpi("Anfragen", m.total.calls, `${m.total.errors} Fehler · ${m.total.fallbacks} Fallbacks`)}
+      ${kpi("Tokens (In/Out)", `${(m.total.tokens_in / 1000).toFixed(1)}k / ${(m.total.tokens_out / 1000).toFixed(1)}k`, `${m.total.cached_tokens} aus Cache`)}
+      ${kpi("Kosten 30 Tage", `${m.total.cost_usd.toFixed(4)} $`, `gesamt: ${m.all_time.cost_usd.toFixed(4)} $`)}
+      ${kpi("Kosten je qualifiziertem Chat", `${(k.kosten_je_chat_usd || 0).toFixed(4)} $`, `${m.qualified_chats} Chats mit ≥ 3 Anfragen`)}
+      ${kpi("Fehlerquote", `${k.fehlerquote_prozent} %`, "Ziel < 2 % sichtbare Ausfälle")}
+      ${kpi("Fallback-Quote", `${k.fallback_quote_prozent} %`, "Anteil Anfragen mit Ausweichmodell")}
+      ${kpi("Ø Dauer", `${m.total.avg_duration_ms} ms`, "je Anfrage")}
+      ${kpi("Kosten geschätzt", `${k.kosten_geschaetzt_anteil_prozent} %`, "Anteil ohne echten Preis (Free-Modelle)")}
+    </div>`;
+  const zeilen = (obj) => Object.entries(obj).map(([name, v]) =>
+    `<tr><td>${esc(name)}</td><td>${v.calls}</td><td>${v.tokens_in}</td><td>${v.tokens_out}</td>
+     <td>${v.cost_usd.toFixed(4)} $</td><td>${v.errors}</td><td>${v.fallbacks}</td></tr>`).join("");
+  $("#tabellenCard").innerHTML = `<h3>📊 Je Kachel</h3>
+    <div class="tablewrap"><table><thead><tr><th>Kachel</th><th>Anfragen</th><th>Tokens In</th><th>Tokens Out</th><th>Kosten</th><th>Fehler</th><th>Fallbacks</th></tr></thead>
+    <tbody>${zeilen(m.per_tile) || '<tr><td colspan="7">noch keine Daten</td></tr>'}</tbody></table></div>
+    <h3>🤖 Je Modell</h3>
+    <div class="tablewrap"><table><thead><tr><th>Modell</th><th>Anfragen</th><th>Tokens In</th><th>Tokens Out</th><th>Kosten</th><th>Fehler</th><th>Fallbacks</th></tr></thead>
+    <tbody>${zeilen(m.per_model) || '<tr><td colspan="7">noch keine Daten</td></tr>'}</tbody></table></div>`;
+  loadHealth();
+  loadEval();
+  loadAudit();
+}
+
+async function loadHealth() {
+  let h;
+  try { h = await api("/api/admin/health"); }
+  catch (e) { $("#healthCard").innerHTML = `<p class="errbox">⚠️ ${esc(e.message)}</p>`; return; }
+  const auf = h.summary.online;
+  const rows = h.tiles.map(t => `<tr><td>${esc(t.name)}</td>
+      <td>${t.chain.map(c => `<span class="pill ${c.ok ? "ok" : (c.checked_at ? "bad" : "unk")}" title="${esc(c.note || "")}">
+        ${esc(c.model.replace(":free", ""))}${c.uptime ? ` · ${c.uptime}%` : ""}</span>`).join(" ")}</td></tr>`).join("");
+  $("#healthCard").innerHTML = `<h3>🩺 Modell-Health-Check
+      <button class="btn tiny" id="healthRun" style="margin-left:0.6rem">Jetzt prüfen</button></h3>
+    <p class="hint">Prüft für jede Kachel die Endpunktliste des Hauptmodells und der Fallbacks.
+      ${auf === null ? "Noch kein Check gelaufen." : (auf ? "OpenRouter erreichbar." : "⚠️ OpenRouter von diesem Server aus nicht erreichbar – Ergebnisse stammen aus dem letzten Check.")}</p>
+    <div class="tablewrap"><table><tbody>${rows}</tbody></table></div>
+    <p class="hint">Legende: <span class="pill ok">ok</span> aktive Anbieter · <span class="pill bad">aus</span> kein aktiver Endpunkt · <span class="pill unk">?</span> nicht geprüft</p>`;
+  $("#healthRun").onclick = async () => {
+    const b = $("#healthRun"); b.disabled = true; b.textContent = "⏳ prüft …";
+    try { const r = await api("/api/admin/health/check", { method: "POST" }); toast(`Health-Check fertig: ${r.failures.length} Probleme`); await loadHealth(); }
+    catch (e) { toast("Fehler: " + e.message); }
+    b.disabled = false; b.textContent = "Jetzt prüfen";
+  };
+}
+
+async function loadEval() {
+  let e;
+  try { e = await api("/api/admin/eval"); }
+  catch (err) { $("#evalCard").innerHTML = `<p class="errbox">⚠️ ${esc(err.message)}</p>`; return; }
+  const tiles = state.tiles.length ? state.tiles : await api("/api/tiles");
+  state.tiles = tiles;
+  const runs = e.runs.map(r => `<tr><td>${esc(r.ts)}</td><td>${esc(r.tile_id)}</td><td>${esc(r.test_case_name)}</td>
+      <td><b class="${r.score >= 80 ? "good" : r.score >= 60 ? "mid" : "bad"}">${r.score}</b></td>
+      <td>${esc(r.model)}</td><td>${esc((r.findings || "").slice(0, 120))}</td></tr>`).join("");
+  $("#evalCard").innerHTML = `<h3>🧪 Eval-Harness (Phase 2)</h3>
+    <p class="hint">Testfälle laufen automatisch gegen das Kachel-Modell und werden nach Plan-Kriterien bewertet:
+      Vollständigkeit, markierte Annahmen, <b>keine erfundenen Zahlen</b>, Format. Ziel: ≥ 90 % der Läufe ohne erfundene Zahlen.</p>
+    <div class="row">
+      <label class="f"><span>Kachel</span><select id="evalTile">
+        ${tiles.map(t => `<option value="${esc(t.id)}">${esc(t.emoji + " " + t.name)}</option>`).join("")}
+      </select></label>
+      <label class="f" style="max-width:140px"><span>Testfälle</span><input type="number" id="evalLimit" value="3" min="1" max="10"></label>
+      <div style="align-self:flex-end"><button class="btn primary" id="evalRun">▶ Eval-Lauf starten</button></div>
+    </div>
+    <div id="evalOut"></div>
+    <div class="tablewrap"><table><thead><tr><th>Zeit</th><th>Kachel</th><th>Testfall</th><th>Score</th><th>Modell</th><th>Befunde</th></tr></thead>
+    <tbody>${runs || '<tr><td colspan="6">noch keine Läufe</td></tr>'}</tbody></table></div>`;
+  $("#evalRun").onclick = async () => {
+    const b = $("#evalRun"); b.disabled = true; b.textContent = "⏳ läuft …";
+    $("#evalOut").innerHTML = `<p class="hint">läuft – pro Testfall ein OpenRouter-Request (Free-Tier-Limit beachten) …</p>`;
+    try {
+      const r = await api("/api/admin/eval/run", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tile_id: $("#evalTile").value, limit: parseInt($("#evalLimit").value || "3", 10) }),
+      });
+      $("#evalOut").innerHTML = r.results.map(x => x.ok
+        ? `<div class="evalrow"><b>${x.score}</b> ${esc(x.testfall)} <span class="hint">${esc(x.model)}${x.unbelegte_zahlen && x.unbelegte_zahlen.length ? " · unbelegt: " + x.unbelegte_zahlen.join(", ") : ""}</span></div>`
+        : `<div class="errbox">⚠️ ${esc(x.testfall || "")}: ${esc(x.error || "")}</div>`).join("");
+      await loadEval();
+    } catch (err) { $("#evalOut").innerHTML = `<p class="errbox">⚠️ ${esc(err.message)}</p>`; }
+    b.disabled = false; b.textContent = "▶ Eval-Lauf starten";
+  };
+}
+
+async function loadAudit() {
+  let a;
+  try { a = await api("/api/admin/audit?limit=60"); }
+  catch (e) { $("#auditCard").innerHTML = `<p class="errbox">⚠️ ${esc(e.message)}</p>`; return; }
+  $("#auditCard").innerHTML = `<h3>🧾 Audit-Log</h3>
+    <p class="hint">Wer hat wann welches Ergebnis erzeugt – Pflicht für kommunalen Einsatz (Phase 0/4).</p>
+    <div class="tablewrap"><table><thead><tr><th>Zeit</th><th>Akteur</th><th>Aktion</th><th>Objekt</th><th>Detail</th></tr></thead>
+    <tbody>${a.map(r => `<tr><td>${esc(r.ts)}</td><td>${esc(r.actor)}</td><td>${esc(r.action)}</td>
+      <td>${esc(r.object_type)} ${esc(r.object_id).slice(0, 12)}</td><td>${esc((r.detail || "").slice(0, 140))}</td></tr>`).join("")
+      || '<tr><td colspan="5">noch keine Einträge</td></tr>'}</tbody></table></div>`;
 }
 
 /* ---------- Init ---------- */

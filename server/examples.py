@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from server import db
+from server.examples_extra import EXAMPLES_NEU
 
 EXAMPLES: dict[str, dict] = {
     # ------------------------------------------------------------ CO₂-Bilanz
@@ -553,6 +554,12 @@ EXAMPLES: dict[str, dict] = {
         ],
     },
 }
+
+
+
+
+# Neue Kacheln (Plan Phase 3) – ausgelagert, damit diese Datei übersichtlich bleibt
+EXAMPLES.update(EXAMPLES_NEU)
 
 
 def _now() -> str:
